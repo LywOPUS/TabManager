@@ -1,0 +1,30 @@
+# dependencies
+node_modules/
+
+# build / caches
+ui/dist/
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+*.local
+.vite/
+.turbo/
+.cache/
+
+# local / scratch
+.scratch/
+.edge-extension-dev-profile/
+*.pem
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
