@@ -1,0 +1,36 @@
+/* 共享微交互：时长 / 缓动与 HeightCollapse、.anim-row、pull-pop 对齐 */
+:root {
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-press: 140ms;
+  --dur-toast: 220ms;
+  --dur-panel: 280ms;
+}
+
+/* Toast：上浮淡入 / 下沉淡出（由 .is-in 切换） */
+.anim-toast {
+  transition:
+    transform var(--dur-toast) var(--ease-out),
+    opacity 180ms ease-out;
+}
+
+.anim-toast:not(.is-in) {
+  transition:
+    transform 180ms var(--ease-in),
+    opacity 140ms ease-in;
+}
+
+/* 按钮 press：轻压，不抢 hover 色 */
+.pressable {
+  transition:
+    transform var(--dur-press) var(--ease-out),
+    background-color 150ms ease,
+    color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    opacity 150ms ease;
+}
+
+.pressable:active:not(:disabled):not([aria-haspopup]) {
+  transform: translateY(1px) scale(0.98);
+}

@@ -21,7 +21,7 @@ function GlassCard({
 }: GlassCardProps) {
   if (glassVariant === "liquid-refract") {
     return (
-      <LiquidGlass {...liquidProps} className={cn("rounded-2xl", surfaceClassName, liquidProps?.className)}>
+      <LiquidGlass {...liquidProps} className={cn("rounded-[var(--radius-xl)]", surfaceClassName, liquidProps?.className)}>
         <Card
           data-slot="glass-card"
           data-glass-variant={glassVariant}

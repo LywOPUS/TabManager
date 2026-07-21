@@ -226,11 +226,11 @@ export function PopupApp() {
     const groups = panel.kind === 'organize' ? panel.groups : panel.kind === 'stash' ? panel.preview.groups : null
     return (
       <PopupShell>
-        <div className="flex items-center gap-1.5 px-0.5">
+        <div className="flex items-center gap-2 px-0.5">
           <button
             type="button"
             aria-label="返回"
-            className="cursor-pointer text-[15px] leading-none text-[#8b8b8e] transition-colors hover:text-[#0a0a0a]"
+            className="grid size-7 shrink-0 place-items-center rounded-lg text-[15px] leading-none text-[#8b8b8e] transition-colors hover:bg-black/5 hover:text-[#0a0a0a] active:scale-95"
             onClick={() => setPanel({ kind: 'idle' })}
           >
             ←
@@ -242,32 +242,34 @@ export function PopupApp() {
 
         <ClassifyPicker value={picker} onChange={onPickerChange} />
 
-        <p className="m-0 px-0.5 text-xs text-[#8b8b8e]">
+        <p className="m-0 px-0.5 text-[11.5px] leading-snug text-[#8b8b8e]" role="status" aria-live="polite">
           {panel.status}
           {(panel.kind.endsWith('busy') || busy) && '…'}
         </p>
 
         {groups && groups.length > 0 && (
-          <div className="flex max-h-[220px] flex-col divide-y divide-black/8 overflow-auto rounded-[10px] border border-black/8 bg-white/40 px-2.5">
+          <div className="flex max-h-[220px] flex-col divide-y divide-black/[0.07] overflow-auto rounded-[10px] border border-black/8 bg-white/50 px-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
             {groups.map((g, i) => (
               <div
                 key={g.name}
-                className="anim-row flex items-baseline justify-between gap-2 py-1.5"
+                className="anim-row flex items-baseline justify-between gap-2 py-[7px]"
                 style={{ '--row-delay': `${Math.min(i, 12) * 18}ms` } as React.CSSProperties}
               >
-                <span className="min-w-0 truncate text-[13px] font-medium text-[#0a0a0a]">{g.name}</span>
-                <span className="shrink-0 text-xs tabular-nums text-[#8b8b8e]">{g.tabs.length}</span>
+                <span className="min-w-0 truncate text-[13px] font-medium tracking-tight text-[#0a0a0a]">{g.name}</span>
+                <span className="shrink-0 rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[11px] tabular-nums text-[#6b6b6e]">
+                  {g.tabs.length}
+                </span>
               </div>
             ))}
           </div>
         )}
 
         {panel.kind === 'stash' && (
-          <label className="flex items-center gap-2 px-0.5 text-xs text-[#8b8b8e]">
+          <label className="flex items-center gap-2 px-0.5 text-[12px] text-[#6b6b6e]">
             会话名
             <input
               type="text"
-              className="min-w-0 flex-1 rounded-lg border border-black/15 bg-white/70 px-2 py-1 text-[13px] text-[#0a0a0a]"
+              className="min-w-0 flex-1 rounded-lg border border-black/12 bg-white/80 px-2.5 py-1.5 text-[13px] text-[#0a0a0a] outline-none transition-[border-color,box-shadow] focus:border-black/30 focus:shadow-[0_0_0_3px_rgba(0,0,0,0.06)]"
               value={panel.name}
               placeholder="保持原名称"
               onChange={(e) =>
@@ -278,10 +280,10 @@ export function PopupApp() {
         )}
 
         {(panel.kind === 'organize' || panel.kind === 'stash') && (
-          <div className="flex justify-end gap-3 px-0.5">
+          <div className="mt-0.5 flex items-center justify-end gap-2.5 px-0.5">
             <button
               type="button"
-              className="cursor-pointer text-xs text-[#8b8b8e] underline-offset-4 hover:text-[#0a0a0a] hover:underline"
+              className="cursor-pointer rounded-lg px-2.5 py-1.5 text-xs text-[#8b8b8e] transition-colors hover:bg-black/5 hover:text-[#0a0a0a]"
               onClick={() => setPanel({ kind: 'idle' })}
             >
               {panel.kind === 'stash' ? '保持原样' : '取消'}
@@ -294,7 +296,7 @@ export function PopupApp() {
                   ? panel.windowId < 0 || !panel.groups.length
                   : !panel.preview.groups.length && !panel.name.trim())
               }
-              className="cursor-pointer text-xs font-medium text-[#0a0a0a] underline underline-offset-4 disabled:opacity-40"
+              className="cursor-pointer rounded-lg bg-[#0a0a0a] px-3 py-1.5 text-xs font-medium text-white transition-[transform,opacity] duration-150 enabled:active:scale-[0.98] disabled:opacity-35"
               onClick={() => void (panel.kind === 'organize' ? applyOrganize() : applyStashReview())}
             >
               {panel.kind === 'stash' ? '应用分组并命名' : '应用分组'}
@@ -308,63 +310,88 @@ export function PopupApp() {
   return (
     <PopupShell>
       <PullToStash disabled={busy} onFire={onStash}>
-      {/* 抓手：提示可以下拉 */}
-      <div className="mx-auto -mt-1 h-1 w-9 shrink-0 rounded-full bg-black/12" title="下拉快速收纳" aria-hidden />
-
       <h1 className="m-0 px-0.5 text-[15px] font-semibold tracking-tight text-[#0a0a0a]">
         Tab Manager
       </h1>
 
-      {recent && (
-        <LensPanel>
-          <span className="text-[#0a0a0a]">最近：{recent.name}</span>
-          <span className="ml-1 text-[#8b8b8e]">{count} 个标签</span>
+      {recent ? (
+        <LensPanel tone="meta">
+          <span className="font-medium text-[#0a0a0a]">最近：{recent.name}</span>
+          <span className="ml-1.5 tabular-nums text-[#8b8b8e]">{count} 个标签</span>
         </LensPanel>
+      ) : (
+        <p className="m-0 px-0.5 text-xs leading-snug text-[#8b8b8e]">还没有会话 — 收纳当前窗口开始</p>
       )}
 
-      <LensPanel as="button" disabled={busy} onClick={() => void onStash()}>
-        收纳当前窗口
-      </LensPanel>
+      <div className="flex flex-col gap-1.5">
+        <LensPanel as="button" tone="primary" disabled={busy} onClick={() => void onStash()}>
+          收纳当前窗口
+        </LensPanel>
 
-      <LensPanel as="button" disabled={busy} onClick={() => void startOrganize()}>
-        整理当前窗口
-      </LensPanel>
+        <LensPanel as="button" disabled={busy} onClick={() => void startOrganize()}>
+          整理当前窗口
+        </LensPanel>
+      </div>
 
-      <LensPanel
-        as="button"
-        disabled={busy || !recent || count === 0}
-        onClick={() => {
-          void (async () => {
-            if (!recent) return
-            setBusy(true)
-            setMsg('分批打开中…')
-            try {
-              const n = await restoreSessionGroups(recent, {
-                onProgress: (m: string) => setMsg(m),
-              })
-              setMsg(`已打开 ${n} 个标签`)
-            } catch {
-              setMsg('恢复失败')
+      <div className="flex flex-col gap-1">
+        <LensPanel
+          as="button"
+          tone="quiet"
+          disabled={busy || !recent || count === 0}
+          title={!recent || count === 0 ? '暂无可恢复的会话' : undefined}
+          onClick={() => {
+            void (async () => {
+              if (!recent) return
+              setBusy(true)
+              setMsg('分批打开中…')
+              try {
+                const n = await restoreSessionGroups(recent, {
+                  onProgress: (m: string) => setMsg(m),
+                })
+                setMsg(`已打开 ${n} 个标签`)
+              } catch {
+                setMsg('恢复失败')
+              }
+              setBusy(false)
+            })()
+          }}
+        >
+          恢复最近会话
+        </LensPanel>
+
+        <LensPanel
+          as="button"
+          tone="quiet"
+          disabled={busy}
+          onClick={() => {
+            chrome.runtime.sendMessage({ type: 'OPEN_MANAGEMENT' })
+            if (window !== window.top) {
+              window.parent.postMessage({ type: 'tm-panel-close' }, '*')
+            } else {
+              window.close()
             }
-            setBusy(false)
-          })()
-        }}
-      >
-        恢复最近会话
-      </LensPanel>
+          }}
+        >
+          打开标签管理
+        </LensPanel>
+      </div>
 
-      <LensPanel
-        as="button"
-        disabled={busy}
-        onClick={() => {
-          chrome.runtime.sendMessage({ type: 'OPEN_MANAGEMENT' })
-          window.close()
-        }}
+      <p
+        className={`m-0 min-h-[16px] px-0.5 text-[11.5px] leading-snug transition-opacity duration-200 ${
+          msg ? 'text-[#5c5c5f] opacity-100' : 'opacity-0'
+        }`}
+        role="status"
+        aria-live="polite"
       >
-        打开标签管理
-      </LensPanel>
+        {msg || '\u00a0'}
+      </p>
 
-      <p className="m-0 min-h-[16px] px-0.5 text-xs text-[#8b8b8e]">{msg}</p>
+      {/* 抓手：底部，提示下拉收纳 */}
+      <div
+        className="mx-auto -mb-0.5 h-1 w-8 shrink-0 rounded-full bg-black/[0.14]"
+        title="下拉快速收纳"
+        aria-hidden
+      />
       </PullToStash>
     </PopupShell>
   )

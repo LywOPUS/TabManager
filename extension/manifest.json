@@ -2,8 +2,17 @@
   "manifest_version": 3,
   "name": "Tab Manager",
   "description": "OneTab 式收纳 + Edge 式本地整理",
-  "version": "0.2.1",
-  "permissions": ["storage", "unlimitedStorage", "tabs", "tabGroups", "contextMenus", "favicon"],
+  "version": "0.2.3",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "tabGroups",
+    "contextMenus",
+    "favicon",
+    "scripting",
+    "activeTab"
+  ],
   "host_permissions": [
     "http://127.0.0.1:11434/*",
     "http://localhost:11434/*",
@@ -17,12 +26,16 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["vendor/transformers/*", "vendor/models/*"],
+      "resources": [
+        "vendor/transformers/*",
+        "vendor/models/*",
+        "popup.html",
+        "mgmt/*"
+      ],
       "matches": ["<all_urls>"]
     }
   ],
   "action": {
-    "default_popup": "popup.html",
     "default_title": "Tab Manager",
     "default_icon": {
       "16": "icons/icon16.png",

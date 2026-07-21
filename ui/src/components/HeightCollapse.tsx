@@ -24,16 +24,27 @@ export function HeightCollapse({ open, children }: { open: boolean; children: Re
       onEndRef.current = null
     }
 
+    // 大块内容（多标签会话）跳过高度动画，避免 scrollHeight + 强制 layout 卡顿
+    const LARGE_PX = 480
+
     if (open) {
       setMounted(true)
       rafRef.current = requestAnimationFrame(() => {
         const node = ref.current
         if (!node) return
         const h = node.scrollHeight
+        if (h > LARGE_PX) {
+          node.style.transition = ''
+          node.style.height = 'auto'
+          node.style.opacity = '1'
+          return
+        }
         node.style.height = '0px'
         node.style.opacity = '0'
         void node.offsetHeight
-        node.style.transition = `height ${OPEN_MS}ms cubic-bezier(0.2,0.7,0.2,1), opacity 180ms ease-out`
+        node.style.transition =
+          `height ${OPEN_MS}ms var(--ease-out, cubic-bezier(0.2,0.7,0.2,1)), ` +
+          `opacity 180ms ease-out`
         node.style.height = `${h}px`
         node.style.opacity = '1'
         const done = (e: TransitionEvent) => {
@@ -51,10 +62,18 @@ export function HeightCollapse({ open, children }: { open: boolean; children: Re
         setMounted(false)
         return detach
       }
-      el.style.height = `${el.scrollHeight}px`
+      const h = el.scrollHeight
+      if (h > LARGE_PX) {
+        // 大内容：直接卸挂载，避免再量一次做收起插值
+        setMounted(false)
+        return detach
+      }
+      el.style.height = `${h}px`
       el.style.opacity = '1'
       void el.offsetHeight
-      el.style.transition = `height ${CLOSE_MS}ms cubic-bezier(0.4,0,0.2,1), opacity 140ms ease-in`
+      el.style.transition =
+        `height ${CLOSE_MS}ms var(--ease-in, cubic-bezier(0.4,0,0.2,1)), ` +
+        `opacity 140ms ease-in`
       el.style.height = '0px'
       el.style.opacity = '0'
       let finished = false

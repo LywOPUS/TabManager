@@ -66,6 +66,50 @@ function notifyStashResult(r) {
   if (!r.ok && r.reason === 'empty') console.info('没有可收纳的标签');
 }
 
+function isRestrictedUrl(url = '') {
+  return /^(chrome|edge|about|devtools|chrome-extension):/i.test(url)
+    || url.startsWith('https://chrome.google.com/webstore')
+    || url.startsWith('https://microsoftedge.microsoft.com/addons');
+}
+
+async function openFallbackPopup() {
+  await chrome.windows.create({
+    url: chrome.runtime.getURL('popup.html'),
+    type: 'popup',
+    width: 320,
+    height: 520,
+  });
+}
+
+/** 页内圆角浮层；受限页 / 注入失败时回退独立小窗 */
+async function togglePanel(tab) {
+  if (!tab?.id) return;
+  if (isRestrictedUrl(tab.url || '')) {
+    await openFallbackPopup();
+    return;
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['panel-host.js'],
+    });
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        if (typeof window.__tmTogglePanel === 'function') window.__tmTogglePanel();
+        else throw new Error('tm panel missing');
+      },
+    });
+  } catch (e) {
+    console.error('[Tab Manager] panel inject failed', e);
+    await openFallbackPopup();
+  }
+}
+
+chrome.action.onClicked.addListener((tab) => {
+  void togglePanel(tab);
+});
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     switch (msg.type) {

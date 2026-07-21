@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { GlassButton } from '@/components/ui/glasscn/glass-button'
 import { Button } from '@/components/ui/button'
 import { Modal } from '@/components/Modal'
@@ -98,7 +98,15 @@ function timeAgo(ts: number) {
 }
 
 /** _favicon API → 收纳时存的 favIconUrl → 域名首字母 */
-function Favicon({ url, favIconUrl, className }: { url: string; favIconUrl?: string; className?: string }) {
+const Favicon = memo(function Favicon({
+  url,
+  favIconUrl,
+  className,
+}: {
+  url: string
+  favIconUrl?: string
+  className?: string
+}) {
   const [stage, setStage] = useState(0)
   const host = useMemo(() => domainOf(url), [url])
   const srcs = useMemo(() => {
@@ -127,24 +135,30 @@ function Favicon({ url, favIconUrl, className }: { url: string; favIconUrl?: str
       src={srcs[stage]}
       alt=""
       loading="lazy"
+      decoding="async"
       onError={() => setStage((s) => s + 1)}
       className={cn('size-4 shrink-0 rounded-[4px]', className)}
     />
   )
-}
+})
 
 function TextAction({
   danger,
+  emphasis,
   className,
   children,
   ...rest
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & { danger?: boolean }) {
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & { danger?: boolean; emphasis?: boolean }) {
   return (
     <button
       type="button"
       className={cn(
-        'cursor-pointer text-[13px] text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline',
-        danger && 'hover:text-destructive',
+        'cursor-pointer rounded-sm text-[13px] underline-offset-4 transition-colors',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35 focus-visible:ring-offset-1',
+        emphasis
+          ? 'font-medium text-foreground/80 hover:text-foreground hover:underline'
+          : 'text-muted-foreground hover:text-foreground hover:underline',
+        danger && 'hover:text-destructive hover:underline',
         className,
       )}
       {...rest}
@@ -181,19 +195,203 @@ function GroupPreviewList({ groups }: { groups: Array<{ name: string; tabs: Arra
   )
 }
 
+/** 会话变更时预建小写 haystack，避免每次 keystroke 对全部 tab 做 toLowerCase / URL 解析 */
+function buildSessionHaystack(session: Session) {
+  const parts: string[] = [session.name]
+  for (const g of session.groups) {
+    parts.push(g.name)
+    for (const t of g.tabs) {
+      parts.push(t.title, t.url, domainOf(t.url))
+    }
+  }
+  return parts.join('\n').toLowerCase()
+}
+
+type SessionActions = {
+  restoreSession: (sessionId: string, andDelete: boolean) => void
+  openSuggest: (sessionId: string) => void
+  renameSession: (sessionId: string) => void
+  confirmDeleteSession: (sessionId: string) => void
+  restoreOneGroup: (sessionId: string, groupId: string) => void
+  openOneTab: (sessionId: string, groupId: string, tabId: string) => void
+  deleteOneTab: (sessionId: string, groupId: string, tabId: string) => void
+}
+
+const SessionRow = memo(function SessionRow({
+  session,
+  open,
+  onToggle,
+  actionsRef,
+}: {
+  session: Session
+  open: boolean
+  onToggle: (id: string) => void
+  actionsRef: React.MutableRefObject<SessionActions>
+}) {
+  // 分组折叠留在行内，避免父级 Set 更新导致整表重渲染
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set())
+  const count = tabCount(session)
+  const a = actionsRef
+
+  return (
+    <section
+      className={cn(
+        !open && '[content-visibility:auto] [contain-intrinsic-size:auto_44px]',
+        open && 'bg-black/[0.015]',
+      )}
+    >
+      <button
+        type="button"
+        aria-expanded={open}
+        className={cn(
+          'flex w-full cursor-pointer items-center gap-2 px-3.5 py-2.5 text-left transition-colors',
+          'hover:bg-black/[0.03] focus-visible:bg-black/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/30',
+          open && 'hover:bg-black/[0.02]',
+        )}
+        onClick={() => onToggle(session.id)}
+      >
+        <span
+          className={cn(
+            'flex size-4 shrink-0 items-center justify-center text-[10px] text-muted-foreground/80 transition-transform duration-150',
+            open && 'rotate-90 text-foreground/55',
+          )}
+          aria-hidden
+        >
+          ▸
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-tight">{session.name}</span>
+        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          <span className="text-foreground/55">{count}</span>
+          <span className="mx-1 text-border">·</span>
+          {timeAgo(session.createdAt)}
+        </span>
+      </button>
+      <HeightCollapse open={open}>
+        <div className="border-t border-border/50 px-3.5 pb-3.5 pt-2.5">
+          <div className="mb-1 flex flex-wrap items-center gap-x-3.5 gap-y-1">
+            <TextAction emphasis onClick={() => void a.current.restoreSession(session.id, false)}>全部恢复</TextAction>
+            <TextAction onClick={() => void a.current.restoreSession(session.id, true)}>恢复并删除会话</TextAction>
+            <TextAction onClick={() => void a.current.openSuggest(session.id)}>建议分组</TextAction>
+            <TextAction onClick={() => void a.current.renameSession(session.id)}>改名</TextAction>
+            <TextAction danger onClick={() => void a.current.confirmDeleteSession(session.id)}>删除</TextAction>
+          </div>
+          {session.groups.map((g) => {
+            const key = `${session.id}:${g.id}`
+            const collapsed = collapsedGroups.has(key)
+            return (
+              <div key={g.id} className="mt-2">
+                <div className="group/g flex items-center gap-2 py-0.5">
+                  <button
+                    type="button"
+                    aria-expanded={!collapsed}
+                    className="cursor-pointer rounded-sm text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35"
+                    onClick={() => {
+                      setCollapsedGroups((prev) => {
+                        const next = new Set(prev)
+                        if (next.has(key)) next.delete(key)
+                        else next.add(key)
+                        return next
+                      })
+                    }}
+                  >
+                    <span aria-hidden>{collapsed ? '▸' : '▾'} </span>
+                    {g.name} · {g.tabs.length}
+                  </button>
+                  <span aria-hidden className="h-px flex-1 bg-border/60" />
+                  <TextAction
+                    className="text-xs opacity-55 transition-opacity group-hover/g:opacity-100 focus-visible:opacity-100"
+                    onClick={() => void a.current.restoreOneGroup(session.id, g.id)}
+                  >
+                    恢复此分组
+                  </TextAction>
+                </div>
+                <HeightCollapse open={!collapsed}>
+                  <div className="mt-0.5 max-h-[min(52vh,420px)] overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
+                    {g.tabs.map((t, i) => (
+                      <div
+                        key={t.id}
+                        className={cn(
+                          'group/row -mx-1 flex items-center gap-2 rounded-md px-1 py-[3px] transition-colors hover:bg-black/[0.035] focus-within:bg-black/[0.03]',
+                          i < 12 && 'anim-row',
+                        )}
+                        style={i < 12 ? ({ '--row-delay': `${i * 18}ms` } as React.CSSProperties) : undefined}
+                      >
+                        <Favicon url={t.url} favIconUrl={t.favIconUrl} />
+                        <span
+                          className="min-w-0 flex-1 truncate text-[13px] leading-[18px] text-muted-foreground transition-colors group-hover/row:text-foreground"
+                          title={t.url}
+                        >
+                          {t.title}
+                        </span>
+                        <span className="hidden max-w-[120px] shrink-0 truncate text-[11px] text-muted-foreground/55 sm:block">
+                          {domainOf(t.url)}
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2.5 opacity-60 transition-opacity group-hover/row:opacity-100 group-focus-within/row:opacity-100">
+                          <TextAction className="text-xs" onClick={() => void a.current.openOneTab(session.id, g.id, t.id)}>打开</TextAction>
+                          <TextAction danger className="text-xs" onClick={() => void a.current.deleteOneTab(session.id, g.id, t.id)}>删除</TextAction>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </HeightCollapse>
+              </div>
+            )
+          })}
+        </div>
+      </HeightCollapse>
+    </section>
+  )
+})
+
 function ManagementApp() {
   const { toast } = useToast()
   const [sessions, setSessions] = useState<Session[]>([])
   const [expanded, setExpanded] = useState<string | null>(null)
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [settings, setSettingsState] = useState<ClassifySettings | null>(null)
   const [modal, setModal] = useState<ModalState>({ kind: 'none' })
+  const [query, setQuery] = useState('')
+  const [stashBusy, setStashBusy] = useState(false)
   const importRef = useRef<HTMLInputElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const bootRef = useRef(false)
+  const actionsRef = useRef<SessionActions>({
+    restoreSession: () => {},
+    openSuggest: () => {},
+    renameSession: () => {},
+    confirmDeleteSession: () => {},
+    restoreOneGroup: () => {},
+    openOneTab: () => {},
+    deleteOneTab: () => {},
+  })
+
+  const deferredQuery = useDeferredValue(query)
+  const sessionHays = useMemo(
+    () => new Map(sessions.map((s) => [s.id, buildSessionHaystack(s)] as const)),
+    [sessions],
+  )
+  const filteredSessions = useMemo(() => {
+    const q = deferredQuery.trim().toLowerCase()
+    if (!q) return sessions
+    return sessions.filter((s) => sessionHays.get(s.id)?.includes(q))
+  }, [sessions, deferredQuery, sessionHays])
+  const liveMatchCount = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return sessions.length
+    let n = 0
+    for (const s of sessions) {
+      if (sessionHays.get(s.id)?.includes(q)) n++
+    }
+    return n
+  }, [query, sessions, sessionHays])
 
   const reload = useCallback(async () => {
     const data = await getData()
     setSessions(data.sessions)
+  }, [])
+
+  const closeModal = useCallback(() => setModal({ kind: 'none' }), [])
+  const onToggleSession = useCallback((id: string) => {
+    setExpanded((prev) => (prev === id ? null : id))
   }, [])
 
   async function persistSettings(patch: Partial<ClassifySettings> & { localModel?: { model: string } }) {
@@ -245,21 +443,45 @@ function ManagementApp() {
     return () => storage?.removeListener(onChanged)
   }, [reload])
 
-  async function onStash() {
-    const r = await chrome.runtime.sendMessage({ type: 'STASH_CURRENT_WINDOW' })
-    if (!r.ok) {
-      if (r.reason === 'empty') toast('没有可收纳的标签')
-      else if (r.reason === 'all_dupe') toast('没有新网页可收纳（本批网址全部重复）')
-      else if (r.reason === 'all_unrestorable') toast('没有可收纳的网页（本地文件等页面无法恢复，已保留）')
-      return
+  // `/` 聚焦搜索（输入框内不拦截）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return
+      const t = e.target as HTMLElement | null
+      if (t?.closest('input, textarea, select, [contenteditable="true"]')) return
+      if (!sessions.length || modal.kind !== 'none') return
+      e.preventDefault()
+      searchRef.current?.focus()
     }
-    toast(stashResultText(r))
-    setExpanded(r.session.id)
-    await reload()
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [sessions.length, modal.kind])
+
+  async function onStash() {
+    if (stashBusy) return
+    setStashBusy(true)
+    let sessionId: string | null = null
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'STASH_CURRENT_WINDOW' })
+      if (!r.ok) {
+        if (r.reason === 'empty') toast('没有可收纳的标签')
+        else if (r.reason === 'all_dupe') toast('没有新网页可收纳（本批网址全部重复）')
+        else if (r.reason === 'all_unrestorable') toast('没有可收纳的网页（本地文件等页面无法恢复，已保留）')
+        else toast('收纳失败')
+        return
+      }
+      toast(stashResultText(r))
+      setExpanded(r.session.id)
+      await reload()
+      sessionId = r.session.id as string
+    } finally {
+      setStashBusy(false)
+    }
+    if (!sessionId) return
     if (settings?.stashReview === false) {
-      await silentEnhance(r.session.id)
+      await silentEnhance(sessionId)
     } else {
-      await openStashReview(r.session.id)
+      await openStashReview(sessionId)
     }
   }
 
@@ -331,6 +553,7 @@ function ManagementApp() {
     }
     await setData(data)
     await reload()
+    toast('已删除标签')
   }
 
   async function restoreOneGroup(sessionId: string, groupId: string) {
@@ -393,6 +616,7 @@ function ManagementApp() {
     await deleteSession(sessionId)
     setExpanded(null)
     await reload()
+    toast('已删除会话')
   }
 
   async function runSuggest(sessionId: string, picker: ClassifySettings, withName = false) {
@@ -518,25 +742,52 @@ function ManagementApp() {
     }
   }
 
+  actionsRef.current = {
+    restoreSession: (sessionId, andDelete) => { void restoreSession(sessionId, andDelete) },
+    openSuggest: (sessionId) => { void openSuggest(sessionId) },
+    renameSession: (sessionId) => { void renameSession(sessionId) },
+    confirmDeleteSession: (sessionId) => { void confirmDeleteSession(sessionId) },
+    restoreOneGroup: (sessionId, groupId) => { void restoreOneGroup(sessionId, groupId) },
+    openOneTab: (sessionId, groupId, tabId) => { void openOneTab(sessionId, groupId, tabId) },
+    deleteOneTab: (sessionId, groupId, tabId) => { void deleteOneTab(sessionId, groupId, tabId) },
+  }
+
   if (!settings) {
     return (
-      <div className="relative min-h-svh">
+      <div className="relative min-h-svh" aria-busy="true">
         <JetBrainsAmbient variant="page" className="fixed inset-0 z-0" />
-        <div className="relative z-10 p-8 text-muted-foreground">加载中…</div>
+        <div className="relative z-10 p-8 text-muted-foreground" role="status">
+          加载中…
+        </div>
       </div>
     )
   }
 
+  const modalLabel =
+    modal.kind === 'busy' ? modal.title
+    : modal.kind === 'suggest' ? (modal.proposedName !== undefined ? '收纳完成 · 确认分组' : '建议分组')
+    : modal.kind === 'live' ? '整理当前窗口'
+    : modal.kind === 'merge' ? '合并并整理到当前窗口'
+    : modal.kind === 'dedup' ? '网页去重'
+    : undefined
+
   return (
     <div className="relative min-h-svh overflow-x-hidden">
       <JetBrainsAmbient variant="page" className="fixed inset-0 z-0" />
-      <header className="sticky top-0 z-20 flex flex-col gap-2.5 border-b border-border bg-white/55 px-4 py-3 backdrop-blur-[24px] backdrop-saturate-150">
+      <header className="sticky top-0 z-20 flex flex-col gap-2 border-b border-border/80 bg-white/60 px-4 py-2.5 backdrop-blur-[24px] backdrop-saturate-150">
         <div className="flex flex-wrap items-center gap-2.5">
-          <h1 className="m-0 text-xl font-semibold tracking-tight">标签管理</h1>
+          <h1 className="m-0 text-lg font-semibold tracking-tight">标签管理</h1>
+          {sessions.length > 0 && (
+            <span className="text-xs tabular-nums text-muted-foreground">
+              {query.trim() ? `${liveMatchCount}/${sessions.length}` : sessions.length} 个会话
+            </span>
+          )}
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <GlassButton onClick={() => void onStash()}>收纳当前窗口</GlassButton>
-            <GlassButton variant="outline" onClick={() => void openLive()}>整理当前窗口</GlassButton>
-            <GlassButton variant="secondary" onClick={() => void openMerge()}>合并并整理全部窗口</GlassButton>
+            <GlassButton disabled={stashBusy} onClick={() => void onStash()}>
+              {stashBusy ? '收纳中…' : '收纳当前窗口'}
+            </GlassButton>
+            <GlassButton variant="outline" disabled={stashBusy} onClick={() => void openLive()}>整理当前窗口</GlassButton>
+            <GlassButton variant="secondary" disabled={stashBusy} onClick={() => void openMerge()}>合并并整理全部窗口</GlassButton>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -568,104 +819,87 @@ function ManagementApp() {
             }}
           />
         </div>
+        {sessions.length > 0 && (
+          <div className="flex items-center gap-2 border-t border-border/50 pt-2">
+            <label className="sr-only" htmlFor="session-search">
+              搜索会话与标签
+            </label>
+            <input
+              ref={searchRef}
+              id="session-search"
+              type="search"
+              value={query}
+              placeholder="搜索会话、标题或网址…（/）"
+              autoComplete="off"
+              className="min-w-0 flex-1 rounded-lg border border-transparent bg-black/[0.04] px-3 py-1.5 text-sm text-foreground outline-none transition-[background,box-shadow,border-color] placeholder:text-muted-foreground/65 hover:bg-black/[0.055] focus-visible:border-ring/30 focus-visible:bg-white/90 focus-visible:ring-3 focus-visible:ring-ring/25"
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && query) {
+                  e.preventDefault()
+                  setQuery('')
+                }
+              }}
+            />
+            {query.trim() && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setQuery('')
+                  searchRef.current?.focus()
+                }}
+              >
+                清除
+              </Button>
+            )}
+          </div>
+        )}
       </header>
 
-      <main className="relative z-10 mx-auto flex max-w-[880px] flex-col px-4 py-5 pb-16">
+      <main className="relative z-10 mx-auto flex max-w-[880px] flex-col px-4 py-4 pb-16">
         {!sessions.length && (
-          <p className="py-24 text-center text-sm text-muted-foreground">
-            还没有会话 — 收纳当前窗口开始
-          </p>
+          <div className="mt-6 flex flex-col items-center gap-4 rounded-2xl border border-dashed border-border/90 bg-white/40 px-6 py-20 text-center backdrop-blur-[8px]">
+            <div className="flex flex-col gap-1.5">
+              <p className="m-0 text-[15px] font-medium tracking-tight text-foreground/90">还没有会话</p>
+              <p className="m-0 text-sm text-muted-foreground">收纳当前窗口，把标签整理到这里</p>
+            </div>
+            <GlassButton disabled={stashBusy} onClick={() => void onStash()}>
+              {stashBusy ? '收纳中…' : '收纳当前窗口'}
+            </GlassButton>
+          </div>
         )}
-        {sessions.length > 0 && (
-          <div className="overflow-hidden rounded-2xl border border-border bg-white shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-            <div className="divide-y divide-border/80">
-              {sessions.map((session) => {
-                const open = expanded === session.id
-                const count = tabCount(session)
-                return (
-                  <section key={session.id}>
-                    <button
-                      type="button"
-                      className="flex w-full cursor-pointer items-center gap-2.5 px-4 py-3 text-left transition hover:bg-black/[0.03]"
-                      onClick={() => setExpanded(open ? null : session.id)}
-                    >
-                      <span className={cn('text-[10px] text-muted-foreground transition-transform', open && 'rotate-90')}>▸</span>
-                      <span className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight">{session.name}</span>
-                      <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-                        {count} 个标签 · {timeAgo(session.createdAt)}
-                      </span>
-                    </button>
-                    <HeightCollapse open={open}>
-                      <div className="border-t border-border/60 px-4 pb-4 pt-3">
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                          <TextAction onClick={() => void restoreSession(session.id, false)}>全部恢复</TextAction>
-                          <TextAction onClick={() => void restoreSession(session.id, true)}>恢复并删除会话</TextAction>
-                          <TextAction onClick={() => void openSuggest(session.id)}>建议分组</TextAction>
-                          <TextAction onClick={() => void renameSession(session.id)}>改名</TextAction>
-                          <TextAction danger onClick={() => void confirmDeleteSession(session.id)}>删除</TextAction>
-                        </div>
-                        {session.groups.map((g) => {
-                          const key = `${session.id}:${g.id}`
-                          const collapsed = collapsedGroups.has(key)
-                          return (
-                            <div key={g.id} className="mt-2.5">
-                              <div className="group/g flex items-center gap-2.5 py-1">
-                                <button
-                                  type="button"
-                                  className="cursor-pointer text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:text-foreground"
-                                  onClick={() => {
-                                    setCollapsedGroups((prev) => {
-                                      const next = new Set(prev)
-                                      if (next.has(key)) next.delete(key)
-                                      else next.add(key)
-                                      return next
-                                    })
-                                  }}
-                                >
-                                  {collapsed ? '▸' : '▾'} {g.name} · {g.tabs.length}
-                                </button>
-                                <span aria-hidden className="h-px flex-1 bg-border/70" />
-                                <TextAction
-                                  className="text-xs opacity-0 transition-opacity group-hover/g:opacity-100 focus-visible:opacity-100"
-                                  onClick={() => void restoreOneGroup(session.id, g.id)}
-                                >
-                                  恢复此分组
-                                </TextAction>
-                              </div>
-                              <HeightCollapse open={!collapsed}>
-                                <div>
-                                  {g.tabs.map((t, i) => (
-                                    <div
-                                      key={t.id}
-                                      className="anim-row group/row -mx-1.5 flex items-center gap-2.5 rounded-md px-1.5 py-[5px] hover:bg-black/[0.035]"
-                                      style={{ '--row-delay': `${Math.min(i, 12) * 18}ms` } as React.CSSProperties}
-                                    >
-                                      <Favicon url={t.url} favIconUrl={t.favIconUrl} />
-                                      <span
-                                        className="min-w-0 flex-1 truncate text-sm leading-[18px] text-muted-foreground transition-colors group-hover/row:text-foreground"
-                                        title={t.url}
-                                      >
-                                        {t.title}
-                                      </span>
-                                      <span className="hidden max-w-[130px] shrink-0 truncate text-xs text-muted-foreground/60 sm:block">
-                                        {domainOf(t.url)}
-                                      </span>
-                                      <span className="flex shrink-0 items-center gap-3 opacity-0 transition-opacity group-hover/row:opacity-100 group-focus-within/row:opacity-100">
-                                        <TextAction className="text-xs" onClick={() => void openOneTab(session.id, g.id, t.id)}>打开</TextAction>
-                                        <TextAction danger className="text-xs" onClick={() => void deleteOneTab(session.id, g.id, t.id)}>删除</TextAction>
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </HeightCollapse>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </HeightCollapse>
-                  </section>
-                )
-              })}
+
+        {sessions.length > 0 && !filteredSessions.length && (
+          <div className="mt-2 rounded-xl border border-border/70 bg-white/50 px-4 py-14 text-center" role="status">
+            <p className="m-0 text-sm text-muted-foreground">
+              没有匹配「{query.trim()}」的会话
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mt-2"
+              onClick={() => {
+                setQuery('')
+                searchRef.current?.focus()
+              }}
+            >
+              清除搜索
+            </Button>
+          </div>
+        )}
+
+        {filteredSessions.length > 0 && (
+          <div className="overflow-hidden rounded-xl border border-border/90 bg-white/92 shadow-[0_1px_2px_rgba(0,0,0,0.035)]">
+            <div className="divide-y divide-border/70">
+              {filteredSessions.map((session) => (
+                <SessionRow
+                  key={session.id}
+                  session={session}
+                  open={expanded === session.id}
+                  onToggle={onToggleSession}
+                  actionsRef={actionsRef}
+                />
+              ))}
             </div>
           </div>
         )}
@@ -673,8 +907,9 @@ function ManagementApp() {
 
       <Modal
         open={modal.kind !== 'none'}
+        label={modalLabel}
         dismissible={!(modal.kind === 'busy' || (modal.kind === 'merge' && modal.busy) || (modal.kind === 'dedup' && modal.removing))}
-        onClose={() => setModal({ kind: 'none' })}
+        onClose={closeModal}
       >
         {modal.kind === 'busy' && (
           <>
@@ -724,7 +959,9 @@ function ManagementApp() {
               <p className="mt-2 text-xs text-muted-foreground">没有可成组的建议。</p>
             )}
             <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <Button variant="outline" onClick={() => setModal({ kind: 'none' })}>取消</Button>
+              <Button variant="outline" onClick={() => setModal({ kind: 'none' })}>
+                {modal.proposedName !== undefined ? '保持原样' : '取消'}
+              </Button>
               <Button
                 variant="secondary"
                 disabled={modal.busy}

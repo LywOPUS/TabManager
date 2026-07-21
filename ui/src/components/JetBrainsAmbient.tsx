@@ -55,6 +55,9 @@ export function JetBrainsAmbient({ className, variant = 'page' }: Props) {
     let running = true
     let paused = typeof document !== 'undefined' && document.hidden
     const t0 = performance.now()
+    // 漂移周期 28–44s，12fps 足够；避免管理页全屏 canvas 空转 60fps
+    const FRAME_MS = 1000 / 12
+    let lastPaint = 0
 
     const paint = (w: number, h: number, t: number) => {
       // base — warm paper, near flat
@@ -111,6 +114,11 @@ export function JetBrainsAmbient({ className, variant = 'page' }: Props) {
 
     const frame = (now: number) => {
       if (!running || paused) return
+      if (!reduceMotion && now - lastPaint < FRAME_MS) {
+        raf = requestAnimationFrame(frame)
+        return
+      }
+      lastPaint = now
       const w = canvas.clientWidth
       const h = canvas.clientHeight
       if (w < 1 || h < 1) {
