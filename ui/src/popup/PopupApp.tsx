@@ -1,7 +1,7 @@
 /**
  * 弹窗：对着「当前打开的标签」立刻动手。
- * 收纳 / 恢复最近会话 / 整理当前窗口 / 解散全部窗口标签组 / 打开标签去重。
- * 管理页：会话、预览整理、跨窗合并、已收纳去重、闲置、设置。
+ * 收纳 / 恢复最近会话 / 整理当前窗口 / 按当前页归组 / 合并全部窗口 / 解散全部窗口标签组 / 打开标签去重。
+ * 管理页：会话、预览整理、跨窗合并确认、已收纳去重、闲置、设置。
  */
 import { useCallback, useEffect, useState } from 'react'
 import {
@@ -23,9 +23,15 @@ import {
   isReadLaterName,
   isUngroupedName,
   newId,
+  mergeAllPrompt,
+  mergeAndOrganizeCurrent,
+  mergeOkText,
+  mergeOrganizeSummary,
   organizeCurrentWindow,
+  organizeAroundCurrentPage,
   organizeFailText,
   organizeOkText,
+  seedOrganizeOkText,
   proposeEnhancement,
   restoreSessionGroups,
   setData,
@@ -46,9 +52,11 @@ import {
   IconGrid,
   IconInbox,
   IconLayers,
+  IconTarget,
   IconMerge,
   IconRestore,
   IconUngroup,
+  IconWindows,
   MetaCard,
   PopupShell,
 } from './PopupShell'
@@ -82,6 +90,7 @@ export function PopupApp() {
   const [panel, setPanel] = useState<Panel>({ kind: 'idle' })
   const [groupStats, setGroupStats] = useState({ tabCount: 0, groupCount: 0, windowCount: 0 })
   const [dupeCloseCount, setDupeCloseCount] = useState(0)
+  const [mergeStats, setMergeStats] = useState({ otherWindows: 0, movableTabs: 0 })
 
   const loadRecent = useCallback(async () => {
     const session = await getRecentSession()
@@ -104,9 +113,17 @@ export function PopupApp() {
   }, [])
 
   const loadLiveStats = useCallback(async () => {
-    const [groups, dupes] = await Promise.all([summarizeOpenTabGroups(), findOpenTabDuplicates()])
+    const [groups, dupes, merge] = await Promise.all([
+      summarizeOpenTabGroups(),
+      findOpenTabDuplicates(),
+      mergeOrganizeSummary(),
+    ])
     setGroupStats(groups)
     setDupeCloseCount(dupes.reduce((n, g) => n + g.items.length, 0))
+    setMergeStats({
+      otherWindows: merge?.otherWindows ?? 0,
+      movableTabs: merge?.movableTabs ?? 0,
+    })
   }, [])
 
   useEffect(() => {
@@ -231,6 +248,38 @@ export function PopupApp() {
       setMsg(r.ok ? organizeOkText(r) : organizeFailText(r.reason))
     } catch {
       setMsg('整理失败')
+    }
+    setBusy(false)
+    await loadLiveStats()
+  }
+
+  async function onOrganizeAroundPage() {
+    setBusy(true)
+    setMsg('按当前页归组…')
+    try {
+      const r = await organizeAroundCurrentPage((m: string) => setMsg(m))
+      setMsg(r.ok ? seedOrganizeOkText(r) : organizeFailText(r.reason))
+    } catch {
+      setMsg('归组失败')
+    }
+    setBusy(false)
+    await loadLiveStats()
+  }
+
+  async function onMergeAll() {
+    const summary = await mergeOrganizeSummary()
+    if (!summary?.otherWindows || !summary.movableTabs) {
+      setMsg('没有其他窗口可合并')
+      return
+    }
+    if (!confirm(mergeAllPrompt(summary.otherWindows, summary.movableTabs))) return
+    setBusy(true)
+    setMsg('合并中…')
+    try {
+      const r = await mergeAndOrganizeCurrent({ onProgress: (m: string) => setMsg(m) })
+      setMsg(r.ok ? mergeOkText(r) : organizeFailText(r.reason))
+    } catch {
+      setMsg('合并失败')
     }
     setBusy(false)
     await loadLiveStats()
@@ -497,10 +546,31 @@ export function PopupApp() {
             <ActionButton
               disabled={busy}
               icon={<IconLayers />}
-              title="跨站主题优先成组，其余同站并入已有组"
+              title="跨站主题优先成组；已成组标签也可以重分"
               onClick={() => void onOrganize()}
             >
               整理当前窗口
+            </ActionButton>
+            <ActionButton
+              disabled={busy}
+              icon={<IconTarget />}
+              title="把同作者或同主题收到当前页这边（可从已有组抽走），不整理其余标签"
+              onClick={() => void onOrganizeAroundPage()}
+            >
+              按当前页归组
+            </ActionButton>
+            <ActionButton
+              disabled={busy || !mergeStats.movableTabs}
+              icon={<IconWindows />}
+              hint={mergeStats.otherWindows ? String(mergeStats.otherWindows) : undefined}
+              title={
+                mergeStats.movableTabs
+                  ? `把 ${mergeStats.otherWindows} 个其他窗口的 ${mergeStats.movableTabs} 个标签并进当前窗口再整理`
+                  : '没有其他窗口可合并'
+              }
+              onClick={() => void onMergeAll()}
+            >
+              合并全部窗口
             </ActionButton>
             <ActionButton
               disabled={busy || !groupStats.groupCount}

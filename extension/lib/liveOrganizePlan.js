@@ -1,9 +1,9 @@
 /**
  * 当前窗口整理计划：跨站主题组优先新建/按组名并入，站点桶仍并入已有同站组，合并同站重复组。
- * 纯函数，不碰 chrome。
+ * 已成组标签也可以被抽走重分。
  */
 import { isStashableTab } from './urls.js';
-import { groupIsSiteish, isJunkGroupName, majoritySite, siteLabel, siteOfTab } from './groupLabels.js';
+import { groupIsSiteish, groupQualifier, isJunkGroupName, isTemplateSite, majoritySite, nameForSeedGroup, pathOwner, siteLabel, siteOfTab, tabMatchesSeed } from './groupLabels.js';
 
 const TAB_GROUP_NONE = -1;
 
@@ -68,8 +68,24 @@ function normName(s) {
 export function matchExistingGroup(tab, existing) {
   const site = siteOfTab(tab);
   const label = site ? siteLabel(site) : '';
+  const owner = String(pathOwner(tab) || '').toLowerCase();
+
+  if (owner && isTemplateSite(site)) {
+    const byOwner = (existing || []).filter((g) => groupQualifier(g) === owner);
+    if (byOwner.length) return largest(byOwner);
+  }
+
   const bySite = (existing || []).filter((g) => g.site && site && g.site === site);
-  if (bySite.length) return largest(bySite);
+  if (isTemplateSite(site)) {
+    const bare = bySite.filter((g) => {
+      const t = String(g.title || '').trim();
+      return !t || t.toLowerCase() === String(label).toLowerCase();
+    });
+    if (bare.length) return largest(bare);
+  } else if (bySite.length) {
+    return largest(bySite);
+  }
+
   const want = new Set(
     [label, site].filter(Boolean).map((s) => String(s).toLowerCase()),
   );
@@ -82,8 +98,12 @@ export function matchExistingGroup(tab, existing) {
 }
 
 function existingClusterKey(g) {
-  if (g.site) return `site:${g.site}`;
   const title = String(g.title || '').trim();
+  const label = g.site ? siteLabel(g.site) : '';
+  if (title && label && title.toLowerCase() !== label.toLowerCase()) {
+    return `title:${title.toLowerCase()}`;
+  }
+  if (g.site) return `site:${g.site}`;
   if (title && !isJunkGroupName(title)) return `title:${title.toLowerCase()}`;
   return `id:${g.groupId}`;
 }
@@ -98,10 +118,96 @@ export function leftoversForClassify(windowTabs, existingMeta, none = TAB_GROUP_
   return ungroupedStashable(windowTabs, none).filter((t) => !matchExistingGroup(t, existing));
 }
 
+function stashableTabs(tabs) {
+  return (tabs || []).filter((t) => isStashableTab(t));
+}
+
+function tabGroupOf(tabs, none = TAB_GROUP_NONE) {
+  const map = new Map();
+  for (const t of tabs || []) {
+    const id = chromeTabId(t);
+    if (id == null || typeof t.groupId !== 'number' || t.groupId === none) continue;
+    map.set(id, t.groupId);
+  }
+  return map;
+}
+
+function seedGroupIsExclusive(g, seed) {
+  const tabs = g?.tabs || [];
+  return tabs.length > 0 && tabs.every((t) => tabMatchesSeed(t, seed));
+}
+
+function makeAbsorbInto(absorbMap, claimed, groupOf = new Map()) {
+  return (hit, tabIds, name) => {
+    if (!hit || !tabIds?.length) return;
+    if (!absorbMap.has(hit.groupId)) {
+      absorbMap.set(hit.groupId, {
+        groupId: hit.groupId,
+        name: hit.title || name || siteLabel(hit.site) || '标签组',
+        tabIds: [],
+      });
+    }
+    const rec = absorbMap.get(hit.groupId);
+    for (const id of tabIds) {
+      if (claimed.has(id)) continue;
+      if (groupOf.get(id) === hit.groupId) {
+        claimed.add(id);
+        continue;
+      }
+      rec.tabIds.push(id);
+      claimed.add(id);
+    }
+  };
+}
+
+/**
+ * 只按当前页收同作者 / 同主题，可从已有标签组抽走匹配项，不动其余标签。
+ * @param {object[]} windowTabs
+ * @param {Array<{ groupId: number, title?: string }>} existingMeta
+ * @param {number} [none]
+ * @param {object|null} seedTab
+ */
+export function planSeedOrganize(windowTabs, existingMeta, none = TAB_GROUP_NONE, seedTab = null) {
+  const existing = decorateExistingGroups(windowTabs, existingMeta, none);
+  const groupOf = tabGroupOf(windowTabs, none);
+  const absorbMap = new Map();
+  const claimed = new Set();
+  const absorbInto = makeAbsorbInto(absorbMap, claimed, groupOf);
+  const create = [];
+  const seed = seedTab && isStashableTab(seedTab) ? seedTab : null;
+  if (seed) {
+    const seedId = chromeTabId(seed);
+    const matches = stashableTabs(windowTabs).filter((t) => tabMatchesSeed(t, seed));
+    const seedGrouped = seedId != null
+      ? existing.find((g) => g.tabs.some((t) => chromeTabId(t) === seedId))
+      : null;
+    if (seedGrouped && seedGroupIsExclusive(seedGrouped, seed)) {
+      const ids = matches.map((t) => chromeTabId(t)).filter((id) => id != null && id !== seedId);
+      absorbInto(seedGrouped, ids, seedGrouped.title || nameForSeedGroup(seed, matches));
+    } else if (matches.length >= 2) {
+      const tabIds = matches.map((t) => chromeTabId(t)).filter((id) => id != null && !claimed.has(id));
+      if (tabIds.length >= 2) {
+        create.push({ name: nameForSeedGroup(seed, matches), tabIds });
+        for (const id of tabIds) claimed.add(id);
+      }
+    }
+  }
+  const leftovers = stashableTabs(windowTabs).filter((t) => {
+    if (typeof t.id !== 'number' || claimed.has(t.id)) return false;
+    return true;
+  });
+  return {
+    absorb: [...absorbMap.values()].filter((a) => a.tabIds.length),
+    create,
+    merge: [],
+    leftoverCount: leftovers.length,
+  };
+}
+
 /**
  * @param {object[]} windowTabs
  * @param {Array<{ groupId: number, title?: string }>} existingMeta
- * @param {{ groups?: Array<{ name: string, tabs?: object[] }> }} leftoverPreview  未成组标签的分类结果（含主题组）
+ * @param {{ groups?: Array<{ name: string, tabs?: object[] }> }} leftoverPreview  本窗可收纳标签的分类结果（含已成组）
  */
 export function planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none = TAB_GROUP_NONE) {
   const existing = decorateExistingGroups(windowTabs, existingMeta, none);
@@ -140,26 +246,11 @@ export function planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none
     for (const id of m.tabIds) claimed.add(id);
   }
 
-  const absorbInto = (hit, tabIds, name) => {
-    if (!hit || !tabIds?.length) return;
-    if (!absorbMap.has(hit.groupId)) {
-      absorbMap.set(hit.groupId, {
-        groupId: hit.groupId,
-        name: hit.title || name || siteLabel(hit.site) || '标签组',
-        tabIds: [],
-      });
-    }
-    const rec = absorbMap.get(hit.groupId);
-    for (const id of tabIds) {
-      if (claimed.has(id)) continue;
-      rec.tabIds.push(id);
-      claimed.add(id);
-    }
-  };
-
+  const absorbInto = makeAbsorbInto(absorbMap, claimed, tabGroupOf(windowTabs, none));
   const create = [];
+
   for (const g of leftoverPreview?.groups || []) {
-    const tabIds = chromeTabIds(g.tabs);
+    const tabIds = chromeTabIds(g.tabs).filter((id) => !claimed.has(id));
     if (!tabIds.length) continue;
     const byTitle = keepGroups.filter((e) => e.title && normName(e.title) === normName(g.name));
     if (byTitle.length) {
@@ -180,14 +271,14 @@ export function planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none
     }
   }
 
-  for (const t of ungroupedStashable(windowTabs, none)) {
+  for (const t of stashableTabs(windowTabs)) {
     if (typeof t.id !== 'number' || claimed.has(t.id)) continue;
     const hit = matchExistingGroup(t, keepGroups);
-    if (!hit) continue;
+    if (!hit || t.groupId === hit.groupId) continue;
     absorbInto(hit, [t.id], hit.title);
   }
 
-  const leftovers = ungroupedStashable(windowTabs, none).filter((t) => {
+  const leftovers = stashableTabs(windowTabs).filter((t) => {
     if (typeof t.id !== 'number' || claimed.has(t.id)) return false;
     return !matchExistingGroup(t, keepGroups);
   });

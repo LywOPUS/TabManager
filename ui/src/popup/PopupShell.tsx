@@ -38,6 +38,15 @@ export function IconInbox({ className }: { className?: string }) {
   )
 }
 
+export function IconTarget({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
+      <circle cx="8" cy="8" r="5.25" stroke="currentColor" strokeWidth="1.5" />
+      <circle cx="8" cy="8" r="1.75" fill="currentColor" />
+    </svg>
+  )
+}
+
 export function IconLayers({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
@@ -98,6 +107,16 @@ export function IconMerge({ className }: { className?: string }) {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  )
+}
+
+/** 合并窗口 */
+export function IconWindows({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
+      <rect x="1.75" y="3.5" width="8" height="6.5" rx="1.1" stroke="currentColor" strokeWidth="1.5" />
+      <rect x="6.25" y="6" width="8" height="6.5" rx="1.1" stroke="currentColor" strokeWidth="1.5" />
     </svg>
   )
 }

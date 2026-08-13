@@ -70,6 +70,7 @@ export {
   applyLivePlan,
   mergeAndOrganizeCurrent,
   organizeCurrentWindow,
+  organizeAroundCurrentPage,
 } from '../../../extension/lib/liveOrganize.js'
 export { summarizeOpenTabGroups, ungroupAllWindows } from '../../../extension/lib/ungroupTabs.js'
 export { restoreGroup, restoreSessionGroups } from '../../../extension/lib/restore.js'
@@ -199,7 +200,9 @@ export function ungroupAllOkText(r: { tabCount: number; groupCount: number }) {
 }
 
 export function organizeFailText(reason?: string) {
-  if (reason === 'too_few') return '未成组的可整理标签太少'
+  if (reason === 'too_few') return '可整理的标签太少'
+  if (reason === 'no_seed') return '当前页无法作为归组起点'
+  if (reason === 'no_seed_match') return '当前页附近没有可归入的标签'
   if (reason === 'no_groups' || reason === 'no_valid_groups') return '没有可成组的建议'
   if (reason === 'no_window') return '找不到当前窗口'
   if (reason === 'partial') return '部分标签组未完成'
@@ -218,6 +221,31 @@ export function organizeOkText(r: {
   if (a.merged) parts.push(`合并 ${a.merged} 组`)
   const src = sourceLabel(r.source)
   return parts.length ? `已整理 · ${parts.join(' · ')}（${src}）` : `已整理当前窗口（${src}）`
+}
+
+export function seedOrganizeOkText(r: {
+  apply?: { created?: number; absorbTabs?: number }
+}) {
+  const a = r.apply || {}
+  const parts = []
+  if (a.absorbTabs) parts.push(`并入 ${a.absorbTabs}`)
+  if (a.created) parts.push(`新建 ${a.created} 组`)
+  return parts.length ? `已按当前页归组 · ${parts.join(' · ')}` : '已按当前页归组'
+}
+
+export function mergeAllPrompt(otherWindows: number, movableTabs: number) {
+  if (!otherWindows || !movableTabs) return '没有其他窗口可合并'
+  return `将 ${otherWindows} 个其他窗口的 ${movableTabs} 个标签并到当前窗口并整理？`
+}
+
+export function mergeOkText(r: {
+  apply?: { created?: number; absorbTabs?: number; merged?: number }
+  source?: string
+  summary?: { movableTabs?: number }
+}) {
+  const moved = r.summary?.movableTabs
+  const organized = organizeOkText(r)
+  return moved ? `已合并 ${moved} 个标签 · ${organized}` : organized
 }
 
 export function sourceLabel(source: string | undefined) {

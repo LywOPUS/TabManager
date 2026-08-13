@@ -1,6 +1,6 @@
 /**
  * 管理页：会话列表、搜索、预览整理/跨窗合并、已收纳去重、闲置、分类、导入导出。
- * 弹窗对打开的标签立刻动手（整理/解散标签组/打开标签去重），见 popup/PopupApp.tsx。
+ * 弹窗对打开的标签立刻动手（整理/合并窗口/解散标签组/打开标签去重），见 popup/PopupApp.tsx。
  */
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { GlassButton } from '@/components/ui/glasscn/glass-button'
@@ -983,7 +983,7 @@ function ManagementApp() {
               ...prev,
               busy: false,
               status:
-                r.reason === 'too_few' ? '未成组的可整理标签太少'
+                r.reason === 'too_few' ? '可整理的标签太少'
                 : r.reason === 'no_groups' ? '没有可成组的建议'
                 : '无法整理',
               preview: null,
@@ -1105,7 +1105,7 @@ function ManagementApp() {
             <GlassButton
               variant="outline"
               disabled={stashBusy}
-              title="预览后应用，只动本窗未成组标签"
+              title="预览后应用；已成组标签也可以重分"
               onClick={() => void openLive()}
             >
               整理当前窗口
@@ -1413,7 +1413,7 @@ function ManagementApp() {
           <>
             <h2 className="m-0 text-[17px] font-semibold tracking-tight">整理当前窗口</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              跨站同一主题会先成组（不拆已有标签组）。X / Instagram / TikTok 标题先剥套话，忙则按作者拆成 @handle。其余同站未成组并入已有组（单条也并入），同站多组合并；忙的 GitHub 会按所有者拆开。应用后折叠非当前组。
+              跨站同一主题会先成组。已在标签组里的也可以抽走重分。X 能确定作者或主题时用 X|alice、X|React。其余同站并入已有组（单条也并入），同站多组合并；忙的 GitHub 会按所有者拆开。应用后折叠非当前组。
             </p>
             <ClassifyPicker
               className="mt-2.5"

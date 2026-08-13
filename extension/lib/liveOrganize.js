@@ -4,6 +4,7 @@ import { classifyOptsFromSettings, getSettings } from './settings.js';
 import {
   planHasWork,
   planLiveOrganize,
+  planSeedOrganize,
   previewFromPlan,
 } from './liveOrganizePlan.js';
 
@@ -22,9 +23,14 @@ export function isNativeUngrouped(tab, none = TAB_GROUP_NONE) {
   return tab.groupId === undefined || tab.groupId === none;
 }
 
-/** 整理当前窗口：未成组、可收纳的标签。已有原生标签组不进预览。 */
+/** 整理当前窗口：可收纳的标签（含已成组，可重分）。 */
+export function tabsForWindowOrganize(tabs) {
+  return (tabs || []).filter((t) => isStashableTab(t));
+}
+
+/** 仅未成组、可收纳的标签。 */
 export function tabsForCurrentWindowOrganize(tabs, none = TAB_GROUP_NONE) {
-  return (tabs || []).filter((t) => isStashableTab(t) && isNativeUngrouped(t, none));
+  return tabsForWindowOrganize(tabs).filter((t) => isNativeUngrouped(t, none));
 }
 
 export function resolveChromeTabId(tab) {
@@ -168,7 +174,7 @@ export async function applyNativeGroups(windowId, preview, onProgress, opts = {}
 }
 
 /**
- * 当前窗口整理：主题组优先新建，站点桶并入已有组、合并同站重复组。不拆已有组。
+ * 当前窗口整理：主题组优先新建，站点桶并入已有组、合并同站重复组。已成组标签可抽走重分。
  * @returns {Promise<{ ok: boolean, created: number, absorbTabs: number, merged: number, failed: Array, reason?: string }>}
  */
 export async function applyLivePlan(windowId, plan, onProgress) {
@@ -344,13 +350,13 @@ export async function getWindowOrganizePreview(windowId, onStatus) {
   const none = chrome.tabGroups?.TAB_GROUP_ID_NONE ?? TAB_GROUP_NONE;
   const windowTabs = await chrome.tabs.query({ windowId });
   const existingMeta = await loadExistingGroupMeta(windowTabs, none);
-  const ungrouped = tabsForCurrentWindowOrganize(windowTabs, none);
+  const stashable = tabsForWindowOrganize(windowTabs);
 
-  let leftoverPreview = { groups: [], ungrouped };
+  let leftoverPreview = { groups: [], ungrouped: stashable };
   let source = 'heuristic';
   let error;
-  if (ungrouped.length >= 2) {
-    const r = await previewLiveOrganizeSmart(ungrouped, onStatus);
+  if (stashable.length >= 2) {
+    const r = await previewLiveOrganizeSmart(stashable, onStatus);
     leftoverPreview = r.preview;
     source = r.source;
     error = r.error;
@@ -358,10 +364,9 @@ export async function getWindowOrganizePreview(windowId, onStatus) {
 
   const plan = planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none);
   if (!planHasWork(plan)) {
-    const ungrouped = tabsForCurrentWindowOrganize(windowTabs, none);
     return {
       ok: false,
-      reason: ungrouped.length ? 'no_groups' : 'too_few',
+      reason: stashable.length >= 2 ? 'no_groups' : 'too_few',
       windowId,
       source,
       error,
@@ -401,23 +406,66 @@ export async function organizeWindow(windowId, onProgress) {
   return { ok: true, preview: r.preview, plan: r.plan, source: r.source, apply: applied };
 }
 
-/** 弹窗 / 右键：立刻整理最近聚焦的普通窗口（未成组标签 → 原生标签组） */
+/** 弹窗 / 右键：立刻整理最近聚焦的普通窗口（含已成组，可重分） */
 export async function organizeCurrentWindow(onProgress) {
   const windowId = await getLastFocusedNormalWindowId();
   if (windowId == null) return { ok: false, reason: 'no_window' };
   return organizeWindow(windowId, onProgress);
 }
 
+export async function getWindowSeedOrganizePreview(windowId) {
+  if (typeof windowId !== 'number') return { ok: false, reason: 'no_window' };
+  const none = chrome.tabGroups?.TAB_GROUP_ID_NONE ?? TAB_GROUP_NONE;
+  const windowTabs = await chrome.tabs.query({ windowId });
+  const existingMeta = await loadExistingGroupMeta(windowTabs, none);
+  const [seedTab] = await chrome.tabs.query({ windowId, active: true });
+  if (!isStashableTab(seedTab)) {
+    return { ok: false, reason: 'no_seed', windowId, source: 'seed' };
+  }
+  const plan = planSeedOrganize(windowTabs, existingMeta, none, seedTab);
+  if (!planHasWork(plan)) {
+    return { ok: false, reason: 'no_seed_match', windowId, source: 'seed' };
+  }
+  return {
+    ok: true,
+    preview: previewFromPlan(plan, windowTabs),
+    plan,
+    windowId,
+    source: 'seed',
+  };
+}
+
+/** 弹窗 / 右键：把同作者或同主题收到当前页这边（可从已有组抽走），不整理其余标签 */
+export async function organizeAroundCurrentPage(onProgress) {
+  const windowId = await getLastFocusedNormalWindowId();
+  if (windowId == null) return { ok: false, reason: 'no_window' };
+  onProgress?.('按当前页归组');
+  const r = await getWindowSeedOrganizePreview(windowId);
+  if (!r.ok) return r;
+  const applied = await applyLivePlan(windowId, r.plan, onProgress);
+  if (!applied.ok) {
+    return {
+      ok: false,
+      reason: applied.reason || 'apply_failed',
+      preview: r.preview,
+      plan: r.plan,
+      source: r.source,
+      apply: applied,
+    };
+  }
+  return { ok: true, preview: r.preview, plan: r.plan, source: r.source, apply: applied };
+}
+
 export async function mergeOrganizeSummary() {
-  const [current] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!current) return null;
-  const allWindows = await chrome.windows.getAll({ populate: true });
+  const windowId = await getLastFocusedNormalWindowId();
+  if (windowId == null) return null;
+  const allWindows = await chrome.windows.getAll({ populate: true, windowTypes: ['normal'] });
   let otherWindows = 0;
   let movableTabs = 0;
   let skippedPinned = 0;
   let skippedUrl = 0;
   for (const w of allWindows) {
-    if (w.id === current.windowId) continue;
+    if (w.id === windowId) continue;
     otherWindows += 1;
     for (const tab of w.tabs || []) {
       if (tab.pinned) {
@@ -431,9 +479,9 @@ export async function mergeOrganizeSummary() {
       movableTabs += 1;
     }
   }
-  const currentTabs = await getStashableTabsInWindow(current.windowId);
+  const currentTabs = await getStashableTabsInWindow(windowId);
   return {
-    targetWindowId: current.windowId,
+    targetWindowId: windowId,
     otherWindows,
     movableTabs,
     skippedPinned,
@@ -452,12 +500,14 @@ export async function mergeAndOrganizeCurrent(opts = {}) {
   const { targetWindowId } = summary;
 
   onProgress('收集其他窗口标签…');
-  const allTabs = await chrome.tabs.query({});
+  const allWindows = await chrome.windows.getAll({ populate: true, windowTypes: ['normal'] });
   const toMove = [];
-  for (const tab of allTabs) {
-    if (tab.windowId === targetWindowId) continue;
-    if (!isStashableTab(tab)) continue;
-    toMove.push(tab.id);
+  for (const w of allWindows) {
+    if (w.id === targetWindowId) continue;
+    for (const tab of w.tabs || []) {
+      if (!isStashableTab(tab) || typeof tab.id !== 'number') continue;
+      toMove.push(tab.id);
+    }
   }
 
   await moveTabsInChunks(toMove, targetWindowId, onProgress);

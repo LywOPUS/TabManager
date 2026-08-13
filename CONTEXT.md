@@ -55,11 +55,17 @@ _UI ZH_: 建议分组；预览操作「应用分组」/「取消」
 _UI EN_: Suggest groups；Apply groups / Cancel
 
 **Live Organize（打开标签整理）**:
-整理当前窗口：未成组标签先按**跨站主题**成组（标题/路径里反复出现的词，如 GitHub 上的 React 与 react.dev →「React」）。X / Instagram / TikTok 等套话站：标题先剥掉「在 X 上的帖子」这类壳，忙的时候按作者拆（至少两个作者各有 ≥2 个标签 → `@alice` / `@bob`），剥壳后的正文才参与跨站主题；不要用「上的」当组名。对不上主题的，同站未成组 **并入已有原生标签组**（含单条）；同站多个标签组合并为一组；其余再新建。GitHub / GitLab 在至少两个 owner 各有 ≥2 个标签时按所有者拆开。弹窗/右键立刻应用到最近聚焦的普通窗口；管理页先预览再应用。跨窗合并只在管理页。应用后折叠非当前标签组。不写入 Session。跳过 pinned 与不可收纳 URL。
-_Avoid_: 收纳, Session Organize
+整理当前窗口：本窗可收纳标签（**含已成组**）按**跨站主题**成组（标题/路径里反复出现的词，如 GitHub 上的 React 与 react.dev →「React」）。已在别的标签组里的也可以抽走重分。X / Instagram / TikTok 等套话站：标题先剥掉「在 X 上的帖子」这类壳；能确定作者或主题时组名用 `X|alice`、`X|React`，不要用「上的」；对不上限定词才落成光秃秃的站点名。对不上主题的，同站 **并入已有原生标签组**（含单条）；同站多个标签组合并为一组；其余再新建。GitHub / GitLab 在至少两个 owner 各有 ≥2 个标签时按所有者拆开。弹窗/右键立刻应用到最近聚焦的普通窗口；管理页先预览再应用。跨窗合并：弹窗确认后立刻并进最近聚焦的普通窗口再整理；管理页先确认。应用后折叠非当前标签组。不写入 Session。跳过 pinned 与不可收纳 URL。
+_Avoid_: 收纳, Session Organize, Seed Organize
 _UI ZH_: 整理当前窗口；整理全部窗口并合并到当前
 _UI EN_: Organize this window；Merge & organize into this window
 _UI ZH 确认框_: 标题「合并并整理到当前窗口？」；按钮「合并并整理」/「取消」
+
+**Seed Organize（按当前页归组）**:
+独立操作，不是整理当前窗口的默认行为。以当前页为种子，把同作者 / 同主题的标签收进来（**可从已有组抽走**；Alice 的推 → `X|alice`，Bob 不进；react.dev → 把已在 GitHub 组里的 `facebook/react` 收成「React」）。不整理窗口里其余标签。弹窗立刻应用；右键同样。管理页不做（当前页是管理页本身）。
+_Avoid_: Live Organize
+_UI ZH_: 按当前页归组
+_UI EN_: Group around this page
 
 **Management Page（管理页）**:
 扩展的主界面：浏览 Session、建议分组、会话内解散、预览整理、跨窗合并、已收纳去重、闲置、设置、导入导出。
@@ -74,11 +80,12 @@ _UI ZH 空状态_: 还没有会话 — 收纳其他标签开始
 | --- | --- | --- |
 | 收纳其他标签 / 连当前页 | 立刻收纳 | 立刻收纳 |
 | 恢复 | 最近一个会话 | 任意会话 / 分组 |
-| 整理当前窗口 | 立刻成组（最近聚焦的窗口，未成组标签） | 预览 + 分类设置后应用（管理页所在窗口） |
+| 整理当前窗口 | 立刻成组（最近聚焦的窗口，含已成组可重分） | 预览 + 分类设置后应用（管理页所在窗口） |
+| 按当前页归组 | 立刻把同作者/同主题收到当前页这边 | — |
 | 解散全部标签组 | 全部窗口的原生标签组 | — |
 | 合并重复网页 | 全部窗口中**打开的**标签 | 打开的标签 + **已收纳**会话 |
 | 会话内解散分组 | — | 主题组并入「未分组」 |
-| 合并并整理全部窗口 | — | 预览确认后合并重建 |
+| 合并并整理全部窗口 | 确认后立刻合并并整理 | 确认后合并重建 |
 | 闲置 / 分类设置 / 导入导出 | — | 有 |
 
 ## UI copy (locked)
@@ -95,7 +102,8 @@ _UI ZH 空状态_: 还没有会话 — 收纳其他标签开始
 | Session 内分组 | 分组 | Group |
 | 建议分组预览 | 应用分组 / 取消 | Apply groups / Cancel |
 | Live 单窗 | 整理当前窗口 | Organize this window |
-| Live 跨窗 | 整理全部窗口并合并到当前 | Merge & organize into this window |
+| 按当前页归组 | 按当前页归组 | Group around this page |
+| Live 跨窗 | 整理全部窗口并合并到当前 / 弹窗「合并全部窗口」 | Merge & organize into this window |
 | 跨窗确认 | 合并并整理到当前窗口？ / 合并并整理 / 取消 | Merge and organize into this window? / Merge & organize / Cancel |
 | 管理页标题 | 标签管理 | Tab Manager |
 | 打开管理页 | 打开标签管理 | Open Tab Manager |

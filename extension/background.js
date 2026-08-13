@@ -1,11 +1,12 @@
 import { stashCurrentWindow, stashAllWindows } from './lib/stash.js';
-import { organizeCurrentWindow, mergeAndOrganizeCurrent } from './lib/liveOrganize.js';
+import { organizeCurrentWindow, organizeAroundCurrentPage, mergeAndOrganizeCurrent } from './lib/liveOrganize.js';
 import { getSettings } from './lib/settings.js';
 
 const MENU = {
   STASH_WINDOW: 'stash-window',
   STASH_ALL: 'stash-all',
   ORGANIZE_WINDOW: 'organize-window',
+  ORGANIZE_AROUND: 'organize-around',
   MERGE_ORGANIZE: 'merge-organize',
 };
 
@@ -60,6 +61,11 @@ function setupContextMenus() {
       contexts: CTX,
     });
     chrome.contextMenus.create({
+      id: MENU.ORGANIZE_AROUND,
+      title: '按当前页归组',
+      contexts: CTX,
+    });
+    chrome.contextMenus.create({
       id: MENU.MERGE_ORGANIZE,
       title: '整理全部窗口并合并到当前',
       contexts: CTX,
@@ -82,6 +88,9 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
     } else if (info.menuItemId === MENU.ORGANIZE_WINDOW) {
       const r = await organizeCurrentWindow();
       await flashStashBadge({ ok: !!r?.ok, count: r?.apply?.created ?? 0 });
+    } else if (info.menuItemId === MENU.ORGANIZE_AROUND) {
+      const r = await organizeAroundCurrentPage();
+      await flashStashBadge({ ok: !!r?.ok, count: (r?.apply?.created ?? 0) + (r?.apply?.absorbTabs ?? 0) });
     } else if (info.menuItemId === MENU.MERGE_ORGANIZE) {
       await openManagement('#merge');
     }
@@ -130,6 +139,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       case 'ORGANIZE_CURRENT_WINDOW':
         sendResponse(await organizeCurrentWindow());
+        break;
+      case 'ORGANIZE_AROUND_CURRENT':
+        sendResponse(await organizeAroundCurrentPage());
         break;
       case 'MERGE_ORGANIZE':
         sendResponse(await mergeAndOrganizeCurrent());

@@ -3,14 +3,15 @@
  *
  * 加站：
  * 1) SITE_LABELS 写显示名
- * 2) 多个域名指向同一站时写 SITE_ALIASES（twitter.com → x.com）
+ * 2) 多个域名指向同一站时写 SITE_ALIASES（twitter.com / t.co → x.com）
  * 3) 标题是「在 X 上的帖子」这类套话 → TEMPLATE_SITES：不要用套话残词当组名；
- *    忙的时候按作者/handle 拆；剥掉套话后的正文才参与跨站主题。
+ *    组名用 X|alice、X|React 这种组合，避免动不动只剩一个「X」。
  */
 import { registrableDomain } from './groupHeuristics.js';
 
 export const SITE_ALIASES = {
   'twitter.com': 'x.com',
+  't.co': 'x.com',
   'youtu.be': 'youtube.com',
   'b23.tv': 'bilibili.com',
 };
@@ -168,22 +169,114 @@ function normalizeHandle(s) {
   return String(s || '').trim().replace(/^@/, '').toLowerCase();
 }
 
+export function parseCompoundSiteName(name) {
+  const s = String(name || '').trim();
+  const i = s.indexOf('|');
+  if (i <= 0) return null;
+  const label = s.slice(0, i).trim();
+  const part = s.slice(i + 1).trim().replace(/^@/, '');
+  if (!label || !part) return null;
+  return { label, part };
+}
+
+export function compoundSiteName(label, part) {
+  const a = String(label || '').trim();
+  const b = String(part || '').replace(/^@/, '').trim();
+  if (!a) return b.slice(0, 24);
+  if (!b || b.toLowerCase() === a.toLowerCase()) return a.slice(0, 24);
+  return `${a}|${b}`.slice(0, 24);
+}
+
+function qualifierOfName(name) {
+  const parsed = parseCompoundSiteName(name);
+  return normalizeHandle(parsed ? parsed.part : name);
+}
+
+function majorityOwner(tabs, minShare = 0.67) {
+  const freq = new Map();
+  for (const t of tabs || []) {
+    const o = normalizeHandle(pathOwner(t));
+    if (!o) continue;
+    freq.set(o, (freq.get(o) || 0) + 1);
+  }
+  let best = '';
+  let bestN = 0;
+  for (const [o, n] of freq) {
+    if (n > bestN) {
+      best = o;
+      bestN = n;
+    }
+  }
+  const denom = (tabs || []).length;
+  if (!best || !denom || bestN / denom < minShare) return '';
+  return best;
+}
+
+function sharedContentToken(tabs) {
+  const df = new Map();
+  for (const t of tabs || []) {
+    for (const tok of tokenizeTitle(contentTitle(t))) {
+      if (isSiteishToken(tok) || GENERIC_TOKENS.has(tok) || /^\d+$/.test(tok)) continue;
+      df.set(tok, (df.get(tok) || 0) + 1);
+    }
+  }
+  let best = '';
+  let bestN = 0;
+  for (const [tok, n] of df) {
+    if (n < 2) continue;
+    if (n > bestN || (n === bestN && tok.length > best.length)) {
+      best = tok;
+      bestN = n;
+    }
+  }
+  return best ? displayToken(best) : '';
+}
+
+function inferTemplateQualifier(tabs) {
+  return majorityOwner(tabs, 0.67) || sharedContentToken(tabs);
+}
+
+export function nameTemplateGroup(site, tabs, fallbackName = '') {
+  const label = siteLabel(site);
+  const inferred = inferTemplateQualifier(tabs);
+  if (inferred) return compoundSiteName(label, inferred);
+  const parsed = parseCompoundSiteName(fallbackName);
+  if (
+    parsed
+    && parsed.label.toLowerCase() === String(label).toLowerCase()
+    && !isJunkGroupName(parsed.part)
+  ) {
+    return compoundSiteName(label, parsed.part);
+  }
+  if (isAuthorGroupName(fallbackName, tabs)) {
+    return compoundSiteName(label, qualifierOfName(fallbackName));
+  }
+  return label;
+}
+
 function formatPathOwner(site, owner) {
   const raw = String(owner || '').replace(/^@/, '');
   if (!raw) return '';
-  if (site === 'x.com' || site === 'instagram.com' || site === 'tiktok.com') {
-    return `@${raw}`.slice(0, 24);
-  }
+  if (isTemplateSite(site)) return compoundSiteName(siteLabel(site), raw);
   return raw.slice(0, 24);
 }
 
 function isAuthorGroupName(name, tabs) {
-  const want = normalizeHandle(name);
+  const want = qualifierOfName(name);
   if (!want || isJunkGroupName(want)) return false;
   const owners = new Set(
     (tabs || []).map((t) => normalizeHandle(pathOwner(t))).filter(Boolean),
   );
   return owners.size === 1 && owners.has(want);
+}
+
+/** 已有标签组的限定词（X|alice → alice），给并入匹配用 */
+export function groupQualifier(g) {
+  const name = String(g?.name || g?.title || '').trim();
+  const parsed = parseCompoundSiteName(name);
+  if (parsed) return normalizeHandle(parsed.part);
+  if (name.startsWith('@')) return normalizeHandle(name);
+  return majorityOwner(g?.tabs || [], 0.67);
 }
 
 /** 套话站标题去掉「在 X 上的帖子」等壳，剩下才是正文 */
@@ -245,10 +338,7 @@ export function finalizeGroupName(name, tabs) {
   const site = majoritySite(tabs);
   const label = site ? siteLabel(site) : '';
   const raw = String(name || '').trim();
-  if (site && isTemplateSite(site)) {
-    if (isAuthorGroupName(raw, tabs)) return formatPathOwner(site, raw);
-    return label;
-  }
+  if (site && isTemplateSite(site)) return nameTemplateGroup(site, tabs, raw);
   if (isJunkGroupName(raw)) return label || '分组';
   if (site && (canonicalSite(raw) === site || raw === site)) return label;
   return raw.slice(0, 24);
@@ -327,6 +417,56 @@ function tokensOfTab(tab) {
   ]);
 }
 
+function sameId(a, b) {
+  if (a == null || b == null) return false;
+  return String(a) === String(b);
+}
+
+/**
+ * 当前页当种子：同站同作者、非套话站的同站、或跨站共享实词。
+ * 套话站（X 等）不要把整站都算匹配，只认同一 handle 或标题里的实词。
+ */
+export function tabMatchesSeed(tab, seed) {
+  if (!tab || !seed) return false;
+  if (sameId(tab.id, seed.id) || (tab.tabId != null && sameId(tab.tabId, seed.tabId ?? seed.id))) {
+    return true;
+  }
+  const seedSite = siteOfTab(seed);
+  const tabSite = siteOfTab(tab);
+  const seedOwner = normalizeHandle(pathOwner(seed));
+  const tabOwner = normalizeHandle(pathOwner(tab));
+  if (seedOwner && tabOwner && seedOwner === tabOwner && (!seedSite || seedSite === tabSite)) {
+    return true;
+  }
+  if (seedSite && tabSite === seedSite && !isTemplateSite(seedSite) && !seedOwner) {
+    return true;
+  }
+  const seedToks = tokensOfTab(seed);
+  const tabToks = tokensOfTab(tab);
+  for (const tok of seedToks) {
+    if (tok.length < 4 || isSiteishToken(tok) || GENERIC_TOKENS.has(tok) || /^\d+$/.test(tok)) continue;
+    if (tabToks.has(tok)) return true;
+  }
+  return false;
+}
+
+/** 以当前页为种子时，新建组该叫什么 */
+export function nameForSeedGroup(seed, members) {
+  const tabs = members?.length ? members : (seed ? [seed] : []);
+  const site = siteOfTab(seed);
+  if (isTemplateSite(site)) return nameTemplateGroup(site, tabs, siteLabel(site));
+  const sites = new Set(tabs.map((t) => siteOfTab(t)).filter(Boolean));
+  if (sites.size > 1) {
+    const shared = sharedContentToken(tabs);
+    if (shared) return shared;
+  }
+  const owner = pathOwner(seed);
+  if (owner && sites.size <= 1) return formatPathOwner(site, owner);
+  const shared = sharedContentToken(tabs);
+  if (shared) return shared;
+  return site ? siteLabel(site) : '标签组';
+}
+
 function siteBucketsOnly(items) {
   const buckets = new Map();
   const ungrouped = [];
@@ -341,8 +481,10 @@ function siteBucketsOnly(items) {
   }
   const groups = [];
   for (const [key, tabs] of buckets) {
-    if (tabs.length >= 2) groups.push(asGroup(siteLabel(key), tabs));
-    else ungrouped.push(...tabs);
+    if (tabs.length >= 2) {
+      const name = isTemplateSite(key) ? nameTemplateGroup(key, tabs, siteLabel(key)) : siteLabel(key);
+      groups.push(asGroup(name, tabs));
+    } else ungrouped.push(...tabs);
   }
   return { groups, ungrouped };
 }
@@ -356,6 +498,7 @@ export function groupIsSiteish(g) {
   const tabs = g?.tabs || [];
   const site = majoritySite(tabs);
   if (!site || !name) return false;
+  if (name.includes('|')) return false;
   const label = siteLabel(site);
   const n = name.toLowerCase();
   return n === String(label).toLowerCase() || canonicalSite(name) === site || n === site;
@@ -481,7 +624,7 @@ export function finalizePreview(preview) {
     const site = majoritySite(tabs);
     const junk = isJunkGroupName(g.name);
     const peel = !!(site && isTemplateSite(site) && (junk || majoritySite(tabs, 0.8) === site));
-    if (peel && !isAuthorGroupName(g.name, tabs)) {
+    if (peel && !isAuthorGroupName(g.name, tabs) && !parseCompoundSiteName(g.name)) {
       const mine = [];
       const other = [];
       for (const t of tabs) {
@@ -537,16 +680,18 @@ export function suggestGroups(items) {
   }
   const groups = [];
   for (const [key, tabs] of buckets) {
-    if (tabs.length >= 2) groups.push(asGroup(siteLabel(key), tabs));
-    else ungrouped.push(...tabs);
+    if (tabs.length >= 2) {
+      const name = isTemplateSite(key) ? nameTemplateGroup(key, tabs, siteLabel(key)) : siteLabel(key);
+      groups.push(asGroup(name, tabs));
+    } else ungrouped.push(...tabs);
   }
   groups.sort((a, b) => a.name.localeCompare(b.name, 'zh'));
   return splitBusySiteGroups({ groups, ungrouped });
 }
 
 /**
- * GitHub / X 等：至少两个 owner 各有 ≥2 个标签时才按 owner 拆开，
- * 否则仍合成一个站点组。
+ * GitHub：至少两个 owner 各有 ≥2 个标签才拆。
+ * X 等套话站：任一作者 ≥2 条就拆成 X|handle，避免整站只剩一个「X」。
  */
 function splitBusySiteGroups(preview) {
   const groups = [];
@@ -570,8 +715,13 @@ function splitBusySiteGroups(preview) {
       byOwner.get(k).tabs.push(t);
     }
     const busy = [...byOwner.values()].filter((x) => x.tabs.length >= 2);
-    if (busy.length < 2) {
+    const template = isTemplateSite(site);
+    if (!template && busy.length < 2) {
       groups.push(g);
+      continue;
+    }
+    if (template && !busy.length) {
+      groups.push(asGroup(nameTemplateGroup(site, g.tabs, g.name), g.tabs));
       continue;
     }
     for (const x of busy) groups.push(asGroup(formatPathOwner(site, x.raw), x.tabs));
@@ -579,8 +729,12 @@ function splitBusySiteGroups(preview) {
       ...rest,
       ...[...byOwner.values()].filter((x) => x.tabs.length < 2).flatMap((x) => x.tabs),
     ];
-    if (leftover.length >= 2) groups.push(asGroup(siteLabel(site), leftover));
-    else ungrouped.push(...leftover);
+    if (leftover.length >= 2) {
+      const leftoverName = template
+        ? nameTemplateGroup(site, leftover, siteLabel(site))
+        : siteLabel(site);
+      groups.push(asGroup(leftoverName, leftover));
+    } else ungrouped.push(...leftover);
   }
   groups.sort((a, b) => b.tabs.length - a.tabs.length || a.name.localeCompare(b.name, 'zh'));
   return { groups, ungrouped };
