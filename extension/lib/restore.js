@@ -1,4 +1,5 @@
 import { isRestorableUrl } from './urls.js';
+import { isUngroupedName } from './groupNames.js';
 
 const CREATE_CHUNK = 6;
 const GROUP_COLORS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan'];
@@ -35,7 +36,7 @@ export async function restoreGroup(group, { onProgress, colorIndex = 0 } = {}) {
     onProgress?.(`创建标签组：${group.name}`);
     const groupId = await chrome.tabs.group({ tabIds });
     await chrome.tabGroups.update(groupId, {
-      title: group.name === '未分组' ? '' : group.name,
+      title: isUngroupedName(group.name) ? '' : group.name,
       color: GROUP_COLORS[colorIndex % GROUP_COLORS.length],
       collapsed: false,
     });

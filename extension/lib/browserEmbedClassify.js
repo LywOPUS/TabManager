@@ -1,4 +1,5 @@
 import { registrableDomain } from './groupHeuristics.js';
+import { canonicalSite, isJunkGroupName, isTemplateSite, siteLabel } from './groupLabels.js';
 import { DEFAULT_BROWSER_MODEL, getBrowserModelMeta } from './browserModels.js';
 
 // ponytail: WebGPU 优先（fp16），失败回退 WASM q8
@@ -221,7 +222,7 @@ function tokenize(text) {
     const run = m[0];
     for (let i = 0; i + 2 <= run.length; i += 1) tokens.push(run.slice(i, i + 2));
   }
-  return tokens;
+  return tokens.filter((t) => !CJK_STOP.has(t) && !isJunkGroupName(t));
 }
 
 function docFreq(itemTokensList) {
@@ -255,6 +256,10 @@ function nameCluster(members, globalDf, totalItems, centralTitle) {
       bestDomainN = n;
     }
   }
+  if (bestDomain) bestDomain = canonicalSite(bestDomain) || bestDomain;
+  if (bestDomain && isTemplateSite(bestDomain) && bestDomainN / members.length >= 0.5) {
+    return siteLabel(bestDomain);
+  }
   const local = new Map();
   for (const m of members) {
     const toks = new Set(tokenize(cleanTitle(m.title)));
@@ -263,7 +268,7 @@ function nameCluster(members, globalDf, totalItems, centralTitle) {
   let best = null;
   let bestScore = 0;
   for (const [tok, ln] of local) {
-    if (ln < 2 || CJK_STOP.has(tok)) continue;
+    if (ln < 2 || CJK_STOP.has(tok) || isJunkGroupName(tok)) continue;
     if (bestDomain && tok === bestDomain) continue;
     const gn = globalDf.get(tok) || 0;
     if (gn / totalItems > 0.6) continue; // 全局泛滥词没有区分度
@@ -273,20 +278,20 @@ function nameCluster(members, globalDf, totalItems, centralTitle) {
       best = tok;
     }
   }
-  if (best) {
+  if (best && !isJunkGroupName(best)) {
     const named = /^[a-z]/.test(best) ? best.charAt(0).toUpperCase() + best.slice(1) : best;
     return named.slice(0, 20);
   }
 
   // 2) 簇中心成员的标题（去掉站点后缀），读起来像话题
   const central = cleanTitle(centralTitle || members[0]?.title);
-  if (central && central !== '分组') return central;
+  if (central && central !== '分组' && !isJunkGroupName(central)) return central;
 
   // 3) 最后才是域名（同一域名 ≥2/3）
   if (bestDomain && bestDomainN >= 2 && bestDomainN / members.length >= 0.67) {
-    return bestDomain;
+    return siteLabel(bestDomain);
   }
-  return central || '分组';
+  return siteLabel(bestDomain) || central || '分组';
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +420,7 @@ export async function classifyWithBrowserEmbed(items, { onStatus, modelId, prefe
   const byDomain = new Map();
   const noDomain = [];
   for (const t of items) {
-    const d = registrableDomain(t.url) || '';
+    const d = canonicalSite(registrableDomain(t.url) || '') || '';
     if (!d) {
       noDomain.push(t);
       continue;
@@ -424,7 +429,7 @@ export async function classifyWithBrowserEmbed(items, { onStatus, modelId, prefe
     byDomain.get(d).push(t);
   }
   const buckets = [...byDomain.entries()];
-  const bigBuckets = buckets.filter(([, tabs]) => tabs.length >= MIN_SPLIT);
+  const bigBuckets = buckets.filter(([domain, tabs]) => tabs.length >= MIN_SPLIT && !isTemplateSite(domain));
 
   // 2) 大桶才嵌入：一次批量编码，按桶切片
   const embedded = new Map(); // tab -> vector
@@ -447,9 +452,9 @@ export async function classifyWithBrowserEmbed(items, { onStatus, modelId, prefe
   const ungrouped = [...noDomain];
   const usedNames = new Set();
   for (const [domain, tabs] of buckets) {
-    if (tabs.length < MIN_SPLIT) {
-      // 小桶：站点组
-      if (tabs.length >= 2) pushGroup(groups, usedNames, domain, tabs);
+    if (tabs.length < MIN_SPLIT || isTemplateSite(domain)) {
+      // 小桶或套话站：整站一组，不再按标题残词切开
+      if (tabs.length >= 2) pushGroup(groups, usedNames, siteLabel(domain) || domain, tabs);
       else ungrouped.push(...tabs);
       continue;
     }
@@ -472,7 +477,7 @@ export async function classifyWithBrowserEmbed(items, { onStatus, modelId, prefe
         singles.push(...c.members);
       }
     }
-    if (singles.length >= 2) pushGroup(groups, usedNames, domain, singles);
+    if (singles.length >= 2) pushGroup(groups, usedNames, siteLabel(domain) || domain, singles);
     else ungrouped.push(...singles);
   }
   groups.sort((a, b) => b.tabs.length - a.tabs.length || a.name.localeCompare(b.name, 'zh'));

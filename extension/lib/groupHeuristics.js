@@ -32,28 +32,3 @@ export function registrableDomain(url) {
     return null;
   }
 }
-
-/** @param {{id:string,title:string,url:string}[]} items */
-export function suggestGroups(items) {
-  const buckets = new Map();
-  const ungrouped = [];
-  for (const item of items) {
-    const key = registrableDomain(item.url);
-    if (!key) {
-      ungrouped.push(item);
-      continue;
-    }
-    if (!buckets.has(key)) buckets.set(key, []);
-    buckets.get(key).push(item);
-  }
-  const groups = [];
-  for (const [key, tabs] of buckets) {
-    if (tabs.length >= 2) {
-      groups.push({ key, name: key, tabIds: tabs.map((t) => t.id), tabs });
-    } else {
-      ungrouped.push(...tabs);
-    }
-  }
-  groups.sort((a, b) => a.name.localeCompare(b.name));
-  return { groups, ungrouped };
-}

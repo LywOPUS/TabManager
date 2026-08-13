@@ -6,6 +6,7 @@
   "scripts": {
     "vendor:transformers": "node scripts/vendor-transformers.mjs",
     "dev:ui": "vite --config ui/vite.config.ts",
+    "check:groups": "node extension/lib/groupLabels.test.mjs && node extension/lib/liveOrganize.test.mjs",
     "build:ui": "vite build --config ui/vite.config.ts"
   },
   "dependencies": {

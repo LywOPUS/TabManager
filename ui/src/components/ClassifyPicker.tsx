@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   BROWSER_MODELS,
+  ensureRemoteHostPermission,
   getBrowserModelWarmState,
   getLastEmbedDevice,
   preloadBrowserModel,
@@ -9,18 +10,50 @@ import { cn } from '@/lib/utils'
 
 export type ClassifySettings = {
   classifyMode: string
+  /** fast = 快速；enhanced = 增强（后处理 / 近义合并 / 模型命名） */
+  groupQuality?: 'fast' | 'enhanced'
   browserModelId: string
   preferWebGPU: boolean
   /** 收纳后弹确认；false = 静默自动整理 */
   stashReview?: boolean
   localModel: { model: string; baseUrl?: string }
+  remoteModel: { baseUrl: string; apiKey: string; model: string }
+}
+
+export type ClassifySettingsPatch = Partial<ClassifySettings> & {
+  localModel?: Partial<ClassifySettings['localModel']>
+  remoteModel?: Partial<ClassifySettings['remoteModel']>
+}
+
+/** 合并分类设置 patch（管理页 / popup 共用） */
+export function mergeClassifySettings(
+  picker: ClassifySettings,
+  patch: ClassifySettingsPatch,
+): ClassifySettings {
+  return {
+    ...picker,
+    ...patch,
+    localModel: { ...picker.localModel, ...(patch.localModel || {}) },
+    remoteModel: {
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: '',
+      model: 'gpt-4o-mini',
+      ...picker.remoteModel,
+      ...(patch.remoteModel || {}),
+    },
+  }
 }
 
 type BrowserModelMeta = { id: string; label: string; note?: string; bundled?: boolean }
 
 type Props = {
   value: ClassifySettings
-  onChange: (next: Partial<ClassifySettings> & { localModel?: { model: string } }) => void
+  onChange: (
+    next: Partial<ClassifySettings> & {
+      localModel?: Partial<ClassifySettings['localModel']>
+      remoteModel?: Partial<ClassifySettings['remoteModel']>
+    },
+  ) => void
   className?: string
 }
 
@@ -63,8 +96,13 @@ function parseProgress(msg: string): Partial<Status> | null {
 export function ClassifyPicker({ value, onChange, className }: Props) {
   const browserOn = value.classifyMode === 'browser'
   const ollamaOn = value.classifyMode === 'ollama'
+  const openaiOn = value.classifyMode === 'openai'
+  const siteOnly = value.classifyMode === 'site'
+  const quality = value.groupQuality === 'enhanced' ? 'enhanced' : 'fast'
+  const remote = value.remoteModel || { baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini' }
   const meta = (BROWSER_MODELS as BrowserModelMeta[]).find((m) => m.id === value.browserModelId)
   const [status, setStatus] = useState<Status | null>(null)
+  const [permHint, setPermHint] = useState<string | null>(null)
   const seqRef = useRef(0)
   const sawDownloadRef = useRef(false)
 
@@ -146,6 +184,15 @@ export function ClassifyPicker({ value, onChange, className }: Props) {
     }
   }, [browserOn, meta, value.browserModelId, value.preferWebGPU])
 
+  function patchRemote(patch: Partial<ClassifySettings['remoteModel']>) {
+    onChange({ remoteModel: { ...remote, ...patch } })
+  }
+
+  async function requestRemoteHost(baseUrl?: string) {
+    const ok = await ensureRemoteHostPermission(baseUrl || remote.baseUrl)
+    setPermHint(ok ? null : '未授予该主机访问权限，请求会失败；可在浏览器扩展权限里允许')
+  }
+
   const showBrowserStatus = browserOn && !!status
   const busy =
     status &&
@@ -157,16 +204,37 @@ export function ClassifyPicker({ value, onChange, className }: Props) {
     <div className={cn('flex min-w-0 flex-col gap-1.5', className)}>
       <div className="flex flex-wrap items-center gap-2 rounded-[11px] border border-border bg-white/60 px-2.5 py-2.5 text-xs text-muted-foreground">
         <label className="inline-flex items-center gap-1.5 font-medium">
+          分组质量
+          <select
+            className="max-w-[120px] rounded-lg border border-black/15 bg-white/80 px-2 py-1 text-[13px] text-foreground"
+            value={quality}
+            disabled={siteOnly}
+            title={siteOnly ? '按站点时质量档位无影响' : undefined}
+            onChange={(e) =>
+              onChange({ groupQuality: e.target.value === 'enhanced' ? 'enhanced' : 'fast' })
+            }
+          >
+            <option value="fast">快速</option>
+            <option value="enhanced">增强</option>
+          </select>
+        </label>
+        <label className="inline-flex items-center gap-1.5 font-medium">
           分类模型
           <select
             className="max-w-[200px] rounded-lg border border-black/15 bg-white/80 px-2 py-1 text-[13px] text-foreground"
             value={value.classifyMode}
-            onChange={(e) => onChange({ classifyMode: e.target.value })}
+            onChange={(e) => {
+              const mode = e.target.value
+              onChange({ classifyMode: mode })
+              if (mode === 'openai') void requestRemoteHost(remote.baseUrl)
+              else setPermHint(null)
+            }}
           >
             <option value="site">按站点</option>
             <option value="browser">浏览器内小模型</option>
             <option value="gemini">Google Gemini Nano</option>
             <option value="ollama">Ollama（本机服务）</option>
+            <option value="openai">OpenAI 兼容</option>
           </select>
         </label>
         <select
@@ -202,6 +270,57 @@ export function ClassifyPicker({ value, onChange, className }: Props) {
           onChange={(e) => onChange({ localModel: { model: e.target.value } })}
         />
       </div>
+
+      {!siteOnly && (
+        <p className="m-0 px-0.5 text-[11px] leading-snug text-muted-foreground/80">
+          {quality === 'enhanced'
+            ? '增强：主题提示加强、域名回填；OpenAI 另含近义组合并与模型命名（更慢、更准）。'
+            : '快速：单次分类即可，分批时仍合并同名组；命名用启发式。'}
+        </p>
+      )}
+
+      {openaiOn && (
+        <div className="flex min-w-0 flex-col gap-2 rounded-[11px] border border-border bg-white/60 px-3 py-2 text-xs text-muted-foreground">
+          <label className="flex min-w-0 flex-col gap-1 font-medium text-foreground/80">
+            API Base
+            <input
+              type="url"
+              className="w-full rounded-lg border border-black/15 bg-white/80 px-2 py-1 text-[13px] font-normal text-foreground"
+              value={remote.baseUrl || ''}
+              placeholder="https://api.openai.com/v1"
+              onChange={(e) => patchRemote({ baseUrl: e.target.value })}
+              onBlur={() => void requestRemoteHost()}
+            />
+          </label>
+          <label className="flex min-w-0 flex-col gap-1 font-medium text-foreground/80">
+            API Key
+            <input
+              type="password"
+              autoComplete="off"
+              className="w-full rounded-lg border border-black/15 bg-white/80 px-2 py-1 text-[13px] font-normal text-foreground"
+              value={remote.apiKey || ''}
+              placeholder="sk-…"
+              onChange={(e) => patchRemote({ apiKey: e.target.value })}
+            />
+          </label>
+          <label className="flex min-w-0 flex-col gap-1 font-medium text-foreground/80">
+            Model
+            <input
+              type="text"
+              className="w-full rounded-lg border border-black/15 bg-white/80 px-2 py-1 text-[13px] font-normal text-foreground"
+              value={remote.model || ''}
+              placeholder="gpt-4o-mini"
+              onChange={(e) => patchRemote({ model: e.target.value })}
+            />
+          </label>
+          <p className="m-0 text-[11px] leading-snug text-muted-foreground/80">
+            标题与域名会发到你配置的端点；Key 仅存本机 chrome.storage.local。保存时归一到 /v1。
+          </p>
+          {permHint && (
+            <p className="m-0 text-[11px] leading-snug text-amber-700">{permHint}</p>
+          )}
+        </div>
+      )}
 
       {showBrowserStatus && status && (
         <div className="min-w-0 rounded-[11px] border border-border bg-white/60 px-3 py-2 text-xs">

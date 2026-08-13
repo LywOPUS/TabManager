@@ -7,6 +7,7 @@ Chrome / Edge MV3 扩展：收纳标签 + 本地整理。源码在 `ui/`，可�
 ```bash
 npm ci                 # 或 npm install
 npm run build:ui       # 构建 popup / 管理页 → extension/
+npm run check:groups   # 站点组名 / X 套话残词
 npm run vendor:transformers  # 仅当 extension/vendor 缺失时
 npm run dev:ui         # 本地预览 :5190
 ```

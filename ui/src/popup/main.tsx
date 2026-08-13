@@ -3,6 +3,11 @@ import { createRoot } from 'react-dom/client'
 import '../index.css'
 import { PopupApp } from './PopupApp'
 
+/** 页内 iframe 嵌入：加 class，去掉独立小窗那圈灰边 */
+if (window !== window.top) {
+  document.body.classList.add('popup-embedded')
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <PopupApp />

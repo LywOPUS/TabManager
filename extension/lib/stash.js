@@ -1,5 +1,6 @@
 import { isRestorableUrl, isStashableTab } from './urls.js';
 import { addSession, defaultSessionName, newId } from './storage.js';
+import { READ_LATER_NAME, UNGROUPED_NAME } from './groupNames.js';
 
 function tabToStashed(tab) {
   return {
@@ -16,7 +17,10 @@ export function buildSessionFromTabs(tabs, name) {
     id: newId(),
     name: name || defaultSessionName(),
     createdAt: Date.now(),
-    groups: [{ id: newId(), name: '未分组', tabs: stashed }],
+    groups: [
+      { id: newId(), name: READ_LATER_NAME, tabs: [] },
+      { id: newId(), name: UNGROUPED_NAME, tabs: stashed },
+    ],
   };
 }
 
@@ -54,14 +58,31 @@ export async function stashTabs(tabs, sessionName) {
   return { ok: true, session, count: keep.length, skipped, skippedUnrestorable };
 }
 
-export async function stashCurrentWindow() {
+/**
+ * 默认留下当前页，避免整窗被收空、弹窗被关掉。
+ * @param {chrome.tabs.QueryInfo} query
+ * @param {{ keepActive?: boolean }} [opts]
+ */
+async function stashQuery(query, { keepActive = true } = {}) {
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const windowId = active?.windowId;
-  const tabs = await collectStashableTabs({ windowId });
+  const tabs = await collectStashableTabs(query);
+  if (keepActive && active?.id != null) {
+    const selected = tabs.filter((t) => t.id !== active.id);
+    if (!selected.length) {
+      return { ok: false, reason: tabs.length ? 'only_active' : 'empty' };
+    }
+    const r = await stashTabs(selected);
+    if (r.ok) r.keptActive = true;
+    return r;
+  }
   return stashTabs(tabs);
 }
 
-export async function stashAllWindows() {
-  const tabs = await collectStashableTabs({});
-  return stashTabs(tabs);
+export async function stashCurrentWindow(opts) {
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return stashQuery({ windowId: active?.windowId }, opts);
+}
+
+export async function stashAllWindows(opts) {
+  return stashQuery({}, opts);
 }

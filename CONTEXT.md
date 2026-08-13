@@ -30,8 +30,14 @@ _Avoid_: 文件夹, Tag（标签名易与 Tab 混淆）, Tab Group（那是浏�
 _UI ZH_: 分组
 _UI EN_: Group
 
+**Read Later（稍后阅读）**:
+Session 内固定保留的分组；收纳时自动创建（可空）。建议分组不改动其中的标签；用户可手动移入/移出。
+_Avoid_: 书签, 收藏夹
+_UI ZH_: 稍后阅读
+_UI EN_: Read later
+
 **Tab Group（原生标签组）**:
-浏览器自带的标签分组；Live Organize 的写入目标。不能跨窗口容纳标签。
+浏览器自带的标签分组；Live Organize 的写入目标。不能跨窗口容纳标签。弹窗「解散全部标签组」拆开全部窗口中的原生组，标签仍打开。
 _Avoid_: Group（本产品 Session 内分组）, Session
 _UI ZH_: 标签组（仅在需要与「分组」对比时使用）
 _UI EN_: Tab group
@@ -49,25 +55,40 @@ _UI ZH_: 建议分组；预览操作「应用分组」/「取消」
 _UI EN_: Suggest groups；Apply groups / Cancel
 
 **Live Organize（打开标签整理）**:
-对仍打开的 Tab 应用启发式并写入原生 Tab Group；跨窗时先合并进当前 Window 再分组。不写入 Session。
+整理当前窗口：未成组标签先按**跨站主题**成组（标题/路径里反复出现的词，如 GitHub 上的 React 与 react.dev →「React」）。X / Instagram / TikTok 等套话站：标题先剥掉「在 X 上的帖子」这类壳，忙的时候按作者拆（至少两个作者各有 ≥2 个标签 → `@alice` / `@bob`），剥壳后的正文才参与跨站主题；不要用「上的」当组名。对不上主题的，同站未成组 **并入已有原生标签组**（含单条）；同站多个标签组合并为一组；其余再新建。GitHub / GitLab 在至少两个 owner 各有 ≥2 个标签时按所有者拆开。弹窗/右键立刻应用到最近聚焦的普通窗口；管理页先预览再应用。跨窗合并只在管理页。应用后折叠非当前标签组。不写入 Session。跳过 pinned 与不可收纳 URL。
 _Avoid_: 收纳, Session Organize
 _UI ZH_: 整理当前窗口；整理全部窗口并合并到当前
 _UI EN_: Organize this window；Merge & organize into this window
 _UI ZH 确认框_: 标题「合并并整理到当前窗口？」；按钮「合并并整理」/「取消」
 
 **Management Page（管理页）**:
-扩展的主界面，用于浏览 Session、整理与恢复。
-_Avoid_: Popup（popup 仅快捷入口）, Side Panel（非 MVP 主壳）
+扩展的主界面：浏览 Session、建议分组、会话内解散、预览整理、跨窗合并、已收纳去重、闲置、设置、导入导出。
+_Avoid_: Popup（弹窗只对当前打开的标签立刻动手）, Side Panel（非 MVP 主壳）
 _UI ZH_: 标签管理
 _UI EN_: Tab Manager
-_UI ZH 空状态_: 还没有会话 — 收纳当前窗口开始
+_UI ZH 空状态_: 还没有会话 — 收纳其他标签开始
+
+## 弹窗 vs 管理页
+
+| 操作 | 弹窗 | 管理页 |
+| --- | --- | --- |
+| 收纳其他标签 / 连当前页 | 立刻收纳 | 立刻收纳 |
+| 恢复 | 最近一个会话 | 任意会话 / 分组 |
+| 整理当前窗口 | 立刻成组（最近聚焦的窗口，未成组标签） | 预览 + 分类设置后应用（管理页所在窗口） |
+| 解散全部标签组 | 全部窗口的原生标签组 | — |
+| 合并重复网页 | 全部窗口中**打开的**标签 | 打开的标签 + **已收纳**会话 |
+| 会话内解散分组 | — | 主题组并入「未分组」 |
+| 合并并整理全部窗口 | — | 预览确认后合并重建 |
+| 闲置 / 分类设置 / 导入导出 | — | 有 |
 
 ## UI copy (locked)
 
 | 场景 | ZH | EN |
 | --- | --- | --- |
-| 收纳动作 | 收纳 | Save tabs |
-| 右键 | 收纳当前窗口 / 收纳全部窗口 | Save tabs in this window / Save tabs in all windows |
+| 收纳动作 | 收纳其他标签 | Save other tabs |
+| 收纳（含当前页） | 连当前页一起收纳 | Save including this tab |
+| 右键 | 收纳当前窗口（保留当前页） / 收纳全部窗口（保留当前页） | Save tabs in this window (keep current) / Save tabs in all windows (keep current) |
+| 快捷键 | Alt+Shift+S 收纳其他标签；Alt+Shift+M 打开标签管理 | Alt+Shift+S save other tabs; Alt+Shift+M open Tab Manager |
 | 单条打开 | 打开 | Open |
 | 整会话恢复 | 全部恢复 | Restore all |
 | 恢复并删会话 | 恢复并删除会话（无独立领域术语） | Restore and delete |
@@ -78,3 +99,5 @@ _UI ZH 空状态_: 还没有会话 — 收纳当前窗口开始
 | 跨窗确认 | 合并并整理到当前窗口？ / 合并并整理 / 取消 | Merge and organize into this window? / Merge & organize / Cancel |
 | 管理页标题 | 标签管理 | Tab Manager |
 | 打开管理页 | 打开标签管理 | Open Tab Manager |
+| 解散全部标签组 | 解散全部标签组 | Ungroup all tab groups |
+| 打开标签去重 | 合并重复网页（全部窗口） | Merge duplicate pages (all windows) |
