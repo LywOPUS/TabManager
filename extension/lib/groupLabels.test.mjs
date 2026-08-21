@@ -9,6 +9,8 @@ import {
   siteLabel,
   suggestGroups,
   tabMatchesSeed,
+  tabMatchesTopic,
+  topicGroupName,
 } from './groupLabels.js';
 
 function tab(id, url, title) {
@@ -29,6 +31,9 @@ assert.equal(siteLabel('x.com'), 'X');
 assert.equal(isJunkGroupName('上的'), true);
 assert.equal(isJunkGroupName('的帖'), true);
 assert.equal(isJunkGroupName('X'), false);
+assert.equal(isJunkGroupName('http'), true);
+assert.equal(isJunkGroupName('https'), true);
+assert.equal(isJunkGroupName('https://youtube.com/watch'), true);
 
 assert.equal(finalizeGroupName('上的', [x1, x2]), 'X');
 assert.equal(finalizeGroupName('帖子', [x1, x2, x3]), 'X');
@@ -197,5 +202,12 @@ assert.equal(
   ]),
   'X|alice',
 );
+
+assert.equal(tabMatchesTopic(seedDocs, 'React'), true);
+assert.equal(tabMatchesTopic(tab('sg', 'https://github.com/facebook/react', 'facebook/react'), 'React'), true);
+assert.equal(tabMatchesTopic(tab('sn', 'https://github.com/vercel/next.js', 'next'), 'React'), false);
+assert.equal(tabMatchesTopic(seedAlice, 'alice'), true);
+assert.equal(tabMatchesTopic(tab('s3', 'https://x.com/bob/status/1', 'Bob 在 X 上的帖子'), 'alice'), false);
+assert.equal(topicGroupName('  机器学习  '), '机器学习');
 
 console.log('groupLabels ok');

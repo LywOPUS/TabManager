@@ -1,6 +1,26 @@
-import { registrableDomain } from './groupHeuristics.js';
-import { canonicalSite, isJunkGroupName, isTemplateSite, siteLabel } from './groupLabels.js';
-import { DEFAULT_BROWSER_MODEL, getBrowserModelMeta } from './browserModels.js';
+import {
+  canonicalSite,
+  isJunkGroupName,
+  isTemplateSite,
+  majoritySite,
+  nameTemplateGroup,
+  pathOwner,
+  siteLabel,
+} from './groupLabels.js';
+import { DEFAULT_BROWSER_MODEL, getBrowserModelMeta, getClusterParams, MINILM_CLUSTER } from './browserModels.js';
+import {
+  MODEL_NOT_DOWNLOADED,
+  accumulateDownloadProgress,
+  formatDownloadStatus,
+  formatLoadStatus,
+  installCacheOnlyFetch,
+  cachedModelHost,
+  isBrowserModelCacheReady,
+  listCachedDtypes,
+  purgeLeftoverModelCache,
+} from './browserModelCache.js';
+import { ensureModelHostPermission, pickModelRemoteHost } from './browserModelHost.js';
+import { canUseOffscreen, inPopupPage, inServiceWorker, offscreenRpc, shouldOffloadModel } from './offscreenRuntime.js';
 
 // ponytail: WebGPU 优先（fp16），失败回退 WASM q8
 let extractorPromise = null;
@@ -44,6 +64,34 @@ export function getLastEmbedDevice() {
   return lastDevice;
 }
 
+/** 卸掉内存里的 extractor，删缓存后下次才能重新加载 */
+export function unloadBrowserModel() {
+  extractorPromise = null;
+  loadedKey = null;
+  if (canUseOffscreen()) {
+    void offscreenRpc('unload').catch(() => {});
+  }
+}
+
+function createProgressTracker(onStatus, { allowDownload = false } = {}) {
+  const files = new Map();
+  return (p) => {
+    if (!p || (p.status !== 'progress' && p.status !== 'done' && p.status !== 'download')) return;
+    // 整理只加载，不报「文件已齐 / 下载中」；模型库下载才走进度。
+    if (!allowDownload) return;
+    const sum = accumulateDownloadProgress(files, p);
+    onStatus?.(sum.complete ? formatLoadStatus(sum) : formatDownloadStatus(sum), {
+      phase: sum.complete ? 'loading' : 'download',
+      pct: sum.pct,
+      loaded: sum.loaded,
+      total: sum.total,
+      filesDone: sum.done,
+      filesTotal: sum.count,
+      file: sum.file,
+    });
+  };
+}
+
 /** UI 用：当前页是否已有可用的 extractor（内存热缓存） */
 export function getBrowserModelWarmState(modelId, preferWebGPU = true) {
   const id = modelId || DEFAULT_BROWSER_MODEL;
@@ -62,11 +110,17 @@ export function getBrowserModelWarmState(modelId, preferWebGPU = true) {
  * `env.backends.onnx = ort.env`（会覆盖事先写入的对象），
  * 因此 wasmPaths 用 setter 注入，确保落到真正的 ort env 上。
  */
-export function configureTransformersEnv(env, { modelPath, wasmPaths, allowRemote = true } = {}) {
-  env.allowLocalModels = true;
+export function configureTransformersEnv(env, {
+  modelPath,
+  wasmPaths,
+  allowRemote = true,
+  remoteHost,
+} = {}) {
+  env.allowLocalModels = !!modelPath;
   if (modelPath) env.localModelPath = modelPath;
   env.allowRemoteModels = allowRemote;
   env.useBrowserCache = true;
+  if (remoteHost) env.remoteHost = remoteHost;
   if (!wasmPaths) return;
   env.backends = env.backends || {};
   let onnxEnv = env.backends.onnx;
@@ -100,14 +154,14 @@ export async function probeWebGPU() {
   }
 }
 
-async function getExtractor(modelId, { onStatus, preferWebGPU = true } = {}) {
+async function getExtractor(modelId, { onStatus, preferWebGPU = true, allowDownload = false } = {}) {
   const id = modelId || DEFAULT_BROWSER_MODEL;
   const key = `${id}|gpu:${preferWebGPU ? 1 : 0}`;
   if (extractorPromise && loadedKey === key) return extractorPromise;
   loadedKey = key;
   extractorPromise = (async () => {
     try {
-      return await loadExtractor(id, { onStatus, preferWebGPU });
+      return await loadExtractor(id, { onStatus, preferWebGPU, allowDownload });
     } catch (e) {
       // 失败不缓存：下次调用可以重试（否则一次网络抖动就把模型判死刑）
       if (loadedKey === key) {
@@ -120,55 +174,88 @@ async function getExtractor(modelId, { onStatus, preferWebGPU = true } = {}) {
   return extractorPromise;
 }
 
-async function loadExtractor(id, { onStatus, preferWebGPU } = {}) {
+async function loadExtractor(id, { onStatus, preferWebGPU, allowDownload = false } = {}) {
+    if (inServiceWorker()) {
+      throw new Error('Service Worker 不能加载模型');
+    }
     const meta = getBrowserModelMeta(id);
+    if (!meta.bundled && !allowDownload) {
+      const ready = await isBrowserModelCacheReady(id);
+      if (!ready) throw new Error(MODEL_NOT_DOWNLOADED);
+    }
+
     const mod = await import(
       chrome.runtime.getURL('vendor/transformers/transformers.web.min.js')
     );
     const { pipeline, env } = mod;
-    // 内置模型本地加载；其余模型走远程 + 浏览器缓存
-    configureTransformersEnv(env, {
-      modelPath: chrome.runtime.getURL('vendor/models/'),
-      wasmPaths: chrome.runtime.getURL('vendor/transformers/'),
-      allowRemote: true,
-    });
-
-    const onProgress = (p) => {
-      if (p?.status === 'progress' && p.file && Number.isFinite(p.progress)) {
-        onStatus?.(`下载 ${p.file.split('/').pop()} ${Math.floor(p.progress)}%`);
-      }
-    };
-
-    // 内置模型直接 WASM q8 本地加载（无 fp16 文件，WebGPU 尝试只会触发远程下载）
+    let remoteHost;
     if (!meta.bundled) {
-      // WebGPU 失败记忆：避免每次整理都白下一遍 fp16
-      const wantGpu = preferWebGPU && !(await isWebgpuDead(id)) && (await probeWebGPU());
-      if (wantGpu) {
-        try {
-          // WebGPU 上 q8 易不准/不稳，用 fp16（文档推荐）
-          onStatus?.(`加载 ${meta.label} · WebGPU…`);
-          const pipe = await pipeline('feature-extraction', id, {
-            device: 'webgpu',
-            dtype: 'fp16',
-            progress_callback: onProgress,
-          });
-          lastDevice = 'webgpu';
-          return pipe;
-        } catch (e) {
-          console.warn('WebGPU embed failed, fallback wasm', e);
-          onStatus?.('WebGPU 失败，回退 WASM（7 天内不再尝试 WebGPU）…');
-          await markWebgpuDead(id);
-        }
+      remoteHost = await cachedModelHost(id);
+      if (allowDownload && !remoteHost) {
+        const ok = await ensureModelHostPermission();
+        if (!ok) throw new Error('未授予模型下载权限（huggingface.co / hf-mirror.com）');
+        onStatus?.('探测模型源…', { phase: 'checking' });
+        remoteHost = await pickModelRemoteHost();
+      }
+      if (allowDownload) {
+        onStatus?.(`从 ${(remoteHost || 'huggingface.co').replace(/^https:\/\//, '')} 拉取…`, { phase: 'download' });
       }
     }
-
-    onStatus?.(`加载 ${meta.label}${meta.bundled ? '（内置）' : ' · WASM'}…`);
-    const pipe = await pipeline('feature-extraction', id, {
-      dtype: 'q8',
-      progress_callback: onProgress,
+    // 远程模型的缓存按 huggingface URL 存；allowRemote 必须开，否则整理时读不到已下载文件。
+    configureTransformersEnv(env, {
+      modelPath: meta.bundled ? chrome.runtime.getURL('vendor/models/') : undefined,
+      wasmPaths: chrome.runtime.getURL('vendor/transformers/'),
+      allowRemote: !meta.bundled,
+      remoteHost,
     });
-    lastDevice = 'wasm';
-    return pipe;
+
+    const onProgress = createProgressTracker(onStatus, { allowDownload });
+    const restoreFetch = !meta.bundled && !allowDownload ? installCacheOnlyFetch() : () => {};
+
+    try {
+      // 内置：扩展包 q8，不走远程。
+      // 远程模型：已有完整 fp16 且 GPU 可用才上 WebGPU；否则只下/用 q8。
+      if (!meta.bundled) {
+        const dtypes = await listCachedDtypes(id);
+        const wantGpu = preferWebGPU && !(await isWebgpuDead(id)) && (await probeWebGPU());
+        const ready = await isBrowserModelCacheReady(id);
+        if (wantGpu && dtypes.includes('fp16') && ready) {
+          try {
+            onStatus?.(`加载 ${meta.label} · WebGPU（本地缓存）…`, { phase: 'loading' });
+            const pipe = await pipeline('feature-extraction', id, {
+              device: 'webgpu',
+              dtype: 'fp16',
+              progress_callback: onProgress,
+            });
+            lastDevice = 'webgpu';
+            return pipe;
+          } catch (e) {
+            console.warn('WebGPU embed failed, fallback wasm', e);
+            onStatus?.('WebGPU 失败，改用量化版…', { phase: 'loading' });
+            await markWebgpuDead(id);
+          }
+        }
+      }
+
+      const cached = meta.bundled ? true : await isBrowserModelCacheReady(id);
+      if (!cached && !allowDownload) throw new Error(MODEL_NOT_DOWNLOADED);
+      onStatus?.(
+        meta.bundled
+          ? `加载 ${meta.label}（内置）…`
+          : cached
+            ? `加载 ${meta.label}（本地缓存）…`
+            : `下载 ${meta.label}（量化版，约一次）…`,
+        { phase: cached || meta.bundled ? 'loading' : 'download' },
+      );
+      const pipe = await pipeline('feature-extraction', id, {
+        dtype: 'q8',
+        progress_callback: onProgress,
+      });
+      lastDevice = 'wasm';
+      return pipe;
+    } finally {
+      restoreFetch();
+    }
 }
 
 function cosine(a, b) {
@@ -184,22 +271,55 @@ function cosine(a, b) {
   return d ? dot / d : 0;
 }
 
-function embedText(item, prefix = '') {
-  // 注意：不要把域名放进编码文本——实测同域不同主题相似度会被域名拉高，
-  // 导致聚类退化成按站点分组。域名先验由"域名分桶"显式承担。
-  // URL 路径里的英文词常带主题信号（/docs/react、/tags/travel）
-  let pathWords = '';
+const PATH_SKIP = new Set([
+  'watch', 'status', 'p', 'reel', 'reels', 'shorts', 'video', 't', 'i',
+  'home', 'explore', 'search', 'login', 'signup', 'share', 'intent',
+]);
+
+function usefulPathWords(url) {
   try {
-    pathWords = new URL(item.url)
-      .pathname.split('/')
-      .filter((s) => /^[A-Za-z][\w-]{2,24}$/.test(s))
-      .slice(0, 3)
-      .join(' ');
+    const parts = new URL(url).pathname.split('/').filter(Boolean);
+    const out = [];
+    for (const raw of parts) {
+      let s = raw;
+      try {
+        s = decodeURIComponent(raw);
+      } catch {
+        /* keep raw */
+      }
+      const low = s.toLowerCase();
+      if (PATH_SKIP.has(low)) continue;
+      // YouTube / 短哈希：无主题信号
+      if (/^[A-Za-z0-9_-]{10,12}$/.test(s) && /[0-9]/.test(s) && /[A-Za-z]/.test(s)) continue;
+      if (!/^[A-Za-z][\w-]{2,24}$/.test(s)) continue;
+      out.push(s);
+      if (out.length >= 3) break;
+    }
+    return out.join(' ');
   } catch {
-    /* ignore */
+    return '';
   }
-  const title = (item.title || '').slice(0, 120);
-  const body = `${title} ${pathWords}`.trim() || item.url || 'tab';
+}
+
+function isUrlTitle(title) {
+  const s = String(title || '').trim();
+  return /^https?:\/\//i.test(s);
+}
+
+function titleForEmbed(item) {
+  const t = String(item?.title || '').trim();
+  if (!t || isUrlTitle(t)) return '';
+  return t.slice(0, 120);
+}
+
+function embedText(item, prefix = '', prefixMinBody = 0) {
+  // 不把域名/协议写进文本，否则未加载页会聚成「Http」。
+  // handle / 有意义的路径段（/docs/react）才带主题。
+  const owner = pathOwner(item);
+  const pathWords = usefulPathWords(item.url);
+  const title = titleForEmbed(item);
+  const body = `${title} ${owner} ${pathWords}`.trim() || 'tab';
+  if (!prefix || (prefixMinBody > 0 && body.length < prefixMinBody)) return body;
   return prefix + body;
 }
 
@@ -233,78 +353,98 @@ function docFreq(itemTokensList) {
   return df;
 }
 
-function cleanTitle(t) {
+function stripTitleDecor(t) {
   let s = String(t || '').trim();
-  // 去掉尾部站点名（"xxx - GitHub"、"xxx | 掘金"、"xxx / X"）
+  s = s.replace(/^\(\d+\)\s*/, '');
   s = s.replace(/\s+[-|—–·:：/][^-|—–·:：/]{1,30}$/, '').trim();
-  return s.slice(0, 20) || '分组';
+  return s;
+}
+
+function cleanTitle(t) {
+  return stripTitleDecor(t).slice(0, 24) || '分组';
+}
+
+/** 标题残词：不能当组名（How Kingdom Was Made → 不要叫 Was） */
+const WEAK_NAME = new Set([
+  ...CJK_STOP,
+  'was', 'how', 'best', 'why', 'what', 'when', 'your', 'own', 'made', 'make',
+  'hours', 'hour', 'video', 'watch', 'youtube', 'this', 'that', 'with', 'from',
+  'into', 'over', 'only', 'just', 'more', 'most', 'first', 'new', 'game', 'games',
+  'play', 'plays', 'part', 'full', 'official', 'trailer', 'teaser', 'mix',
+  'ultimate', 'introduction', 'intro', 'keep', 'thinking',
+  'http', 'https', 'www', 'com', 'org', 'net', 'html', 'htm',
+]);
+
+function isWeakNameToken(tok) {
+  const s = String(tok || '').trim();
+  if (!s || isJunkGroupName(s) || WEAK_NAME.has(s.toLowerCase())) return true;
+  if (/^[a-z]{1,3}$/i.test(s)) return true;
+  if (/^https?:\/\//i.test(s)) return true;
+  return false;
+}
+
+function isShellTab(item) {
+  const title = String(item?.title || '').trim();
+  const usable = title && !isUrlTitle(title);
+  if (usable) {
+    const core = cleanTitle(title).toLowerCase();
+    if (!core || core === '分组') return true;
+    if (['youtube', 'x', 'twitter', '主页', 'home', 'gmail', 'google'].includes(core)) return true;
+    if (/^(主页|home)\s*\/\s*x$/i.test(title)) return true;
+    return false;
+  }
+  // 标题空或就是网址：没有作者/路径主题就不要进聚类，避免堆成 Http
+  return !pathOwner(item) && !usefulPathWords(item.url);
 }
 
 function nameCluster(members, globalDf, totalItems, centralTitle) {
-  // 1) 区分度主题词：簇内 df ≥2 且全局占比低；score = 簇内次数 / 全局次数
-  //    只对「洗掉站点后缀的标题」分词，避免 Notion/GitHub 这类词冒充主题
-  const domainCounts = new Map();
-  for (const m of members) {
-    const d = registrableDomain(m.url);
-    if (d) domainCounts.set(d, (domainCounts.get(d) || 0) + 1);
+  const site = majoritySite(members);
+  if (site && isTemplateSite(site)) {
+    const named = nameTemplateGroup(site, members, '');
+    if (named && named !== siteLabel(site) && !isJunkGroupName(named)) return named;
   }
-  let bestDomain = null;
-  let bestDomainN = 0;
-  for (const [d, n] of domainCounts) {
-    if (n > bestDomainN) {
-      bestDomain = d;
-      bestDomainN = n;
-    }
-  }
-  if (bestDomain) bestDomain = canonicalSite(bestDomain) || bestDomain;
-  if (bestDomain && isTemplateSite(bestDomain) && bestDomainN / members.length >= 0.5) {
-    return siteLabel(bestDomain);
-  }
+
   const local = new Map();
   for (const m of members) {
-    const toks = new Set(tokenize(cleanTitle(m.title)));
+    const toks = new Set(tokenize(stripTitleDecor(m.title)));
     for (const t of toks) local.set(t, (local.get(t) || 0) + 1);
   }
   let best = null;
   let bestScore = 0;
   for (const [tok, ln] of local) {
-    if (ln < 2 || CJK_STOP.has(tok) || isJunkGroupName(tok)) continue;
-    if (bestDomain && tok === bestDomain) continue;
+    if (ln < 2 || isWeakNameToken(tok)) continue;
+    if (site && (tok === site || tok === canonicalSite(site))) continue;
     const gn = globalDf.get(tok) || 0;
-    if (gn / totalItems > 0.6) continue; // 全局泛滥词没有区分度
+    const outsideN = Math.max(0, totalItems - members.length);
+    if (outsideN >= 4 && (gn - ln) / outsideN > 0.5) continue;
     const score = (ln / Math.max(1, gn)) * Math.log(1 + ln);
     if (score > bestScore) {
       bestScore = score;
       best = tok;
     }
   }
-  if (best && !isJunkGroupName(best)) {
+  if (best) {
     const named = /^[a-z]/.test(best) ? best.charAt(0).toUpperCase() + best.slice(1) : best;
     return named.slice(0, 20);
   }
 
-  // 2) 簇中心成员的标题（去掉站点后缀），读起来像话题
   const central = cleanTitle(centralTitle || members[0]?.title);
-  if (central && central !== '分组' && !isJunkGroupName(central)) return central;
-
-  // 3) 最后才是域名（同一域名 ≥2/3）
-  if (bestDomain && bestDomainN >= 2 && bestDomainN / members.length >= 0.67) {
-    return siteLabel(bestDomain);
+  if (central && central !== '分组' && !isUrlTitle(central) && !isWeakNameToken(central)) {
+    return central;
   }
-  return siteLabel(bestDomain) || central || '分组';
+
+  if (site && !isTemplateSite(site) && majoritySite(members, 0.8)) {
+    return siteLabel(site) || site;
+  }
+  return '主题';
 }
 
 // ---------------------------------------------------------------------------
-// 聚类：域名分桶 → 大桶内凝聚式（average linkage）→ 分位数自适应阈值
-//
-// 为什么不全局聚类：实测小模型在短标题上的相似度分布太扁/太噪，
-// 全局单一阈值不是一刀切就是碎一地；而「同域内」主题可分性显著更好。
-// 自适应阈值用桶内两两相似度的分位数，对 e5/bge 的压缩分布同样稳健。
+// 聚类：全部标签一次嵌入 → 全局凝聚式（average linkage）→ 分位数阈值
+// 套话站（X 等）也进模型；不像的留未分组，不再整站收成「X」。
 // ---------------------------------------------------------------------------
 
-const MIN_SPLIT = 4; // 域名桶 ≥4 个标签才做主题细分
-const SIM_FLOOR = 0.3; // 绝对下限：低于此不合并
-const SIM_Q = 0.7; // 桶内两两相似度分位数
+const EMBED_BATCH = 16;
 
 function quantile(sorted, q) {
   if (!sorted.length) return 0;
@@ -407,82 +547,111 @@ function pushGroup(groups, usedNames, name, members) {
   });
 }
 
-export async function preloadBrowserModel(modelId, { preferWebGPU = true, onStatus } = {}) {
-  await getExtractor(modelId, { onStatus, preferWebGPU });
-  return true;
-}
-
-export async function classifyWithBrowserEmbed(items, { onStatus, modelId, preferWebGPU = true } = {}) {
-  if (!items.length) return { groups: [], ungrouped: [] };
-  const meta = getBrowserModelMeta(modelId || DEFAULT_BROWSER_MODEL);
-
-  // 1) 域名分桶：小桶直接是站点组，不需要模型
-  const byDomain = new Map();
-  const noDomain = [];
-  for (const t of items) {
-    const d = canonicalSite(registrableDomain(t.url) || '') || '';
-    if (!d) {
-      noDomain.push(t);
-      continue;
-    }
-    if (!byDomain.has(d)) byDomain.set(d, []);
-    byDomain.get(d).push(t);
-  }
-  const buckets = [...byDomain.entries()];
-  const bigBuckets = buckets.filter(([domain, tabs]) => tabs.length >= MIN_SPLIT && !isTemplateSite(domain));
-
-  // 2) 大桶才嵌入：一次批量编码，按桶切片
-  const embedded = new Map(); // tab -> vector
-  if (bigBuckets.length) {
-    const flat = bigBuckets.flatMap(([, tabs]) => tabs);
-    const extractor = await getExtractor(meta.id, { onStatus, preferWebGPU });
-    onStatus?.(`编码 ${flat.length} 个标签（${meta.label} · ${lastDevice}）…`);
-    const prefix = meta.textPrefix || '';
-    const texts = flat.map((t) => embedText(t, prefix));
-    const output = await extractor(texts, { pooling: 'mean', normalize: true });
-    const list = output.tolist();
-    for (let i = 0; i < flat.length; i += 1) embedded.set(flat[i], Float32Array.from(list[i]));
-    onStatus?.('按主题聚类…');
-  }
-
-  // 全局词频（主题命名做区分度参照；用洗掉站点后缀的标题）
-  const globalDf = docFreq(items.map((t) => new Set(tokenize(cleanTitle(t.title)))));
-
+/** 已有向量时的全局聚类（单测 / 调试） */
+export function clusterPreview(items, vectors, cluster = MINILM_CLUSTER) {
   const groups = [];
-  const ungrouped = [...noDomain];
+  const ungrouped = [];
   const usedNames = new Set();
-  for (const [domain, tabs] of buckets) {
-    if (tabs.length < MIN_SPLIT || isTemplateSite(domain)) {
-      // 小桶或套话站：整站一组，不再按标题残词切开
-      if (tabs.length >= 2) pushGroup(groups, usedNames, siteLabel(domain) || domain, tabs);
-      else ungrouped.push(...tabs);
+  if (!items.length) return { groups, ungrouped };
+  const { floor, q, cap } = getClusterParams({ cluster });
+  const globalDf = docFreq(items.map((t) => new Set(tokenize(stripTitleDecor(t.title)))));
+  const simMatrix = buildSimMatrix(vectors);
+  const sims = [];
+  const n = items.length;
+  for (let i = 0; i < n; i += 1) {
+    for (let j = i + 1; j < n; j += 1) sims.push(simMatrix[i * n + j]);
+  }
+  sims.sort((a, b) => a - b);
+  const threshold = Math.max(floor, Math.min(cap, quantile(sims, q)));
+  const clusters = agglomerative(items, vectors, simMatrix, threshold);
+  for (const c of clusters) {
+    if (c.members.length < 2) {
+      ungrouped.push(...c.members);
       continue;
     }
-    const vecs = tabs.map((t) => embedded.get(t));
-    const simMatrix = buildSimMatrix(vecs);
-    const sims = [];
-    for (let i = 0; i < vecs.length; i += 1) {
-      for (let j = i + 1; j < vecs.length; j += 1) sims.push(simMatrix[i * vecs.length + j]);
-    }
-    sims.sort((a, b) => a - b);
-    const threshold = Math.max(SIM_FLOOR, quantile(sims, SIM_Q));
-    const clusters = agglomerative(tabs, vecs, simMatrix, threshold);
-    // ≥2 的子簇成主题组；落单的合成「站点 · 其他」组
-    const singles = [];
-    for (const c of clusters) {
-      if (c.members.length >= 2) {
-        const name = nameCluster(c.members, globalDf, items.length, centralMember(c)?.title);
-        pushGroup(groups, usedNames, name, c.members);
-      } else {
-        singles.push(...c.members);
-      }
-    }
-    if (singles.length >= 2) pushGroup(groups, usedNames, siteLabel(domain) || domain, singles);
-    else ungrouped.push(...singles);
+    const name = nameCluster(c.members, globalDf, items.length, centralMember(c)?.title);
+    pushGroup(groups, usedNames, name, c.members);
   }
   groups.sort((a, b) => b.tabs.length - a.tabs.length || a.name.localeCompare(b.name, 'zh'));
   return { groups, ungrouped };
 }
 
+export async function preloadBrowserModel(modelId, { preferWebGPU = true, onStatus } = {}) {
+  if (inPopupPage()) throw new Error(MODEL_NOT_DOWNLOADED);
+  const meta = getBrowserModelMeta(modelId);
+  if (shouldOffloadModel(meta)) {
+    try {
+      await offscreenRpc('preload', { modelId, opts: { preferWebGPU } }, onStatus);
+      return true;
+    } catch (e) {
+      if (inServiceWorker()) throw e;
+      const raw = String(e?.message || e);
+      if (!/无法启动|未就绪|Receiving end|offscreen/i.test(raw)) throw e;
+      console.warn('offscreen preload fallback', e);
+    }
+  }
+  await getExtractor(modelId, { onStatus, preferWebGPU, allowDownload: true });
+  try {
+    await purgeLeftoverModelCache(modelId);
+  } catch {
+    /* 量化版已就绪，清残留失败不挡用 */
+  }
+  return true;
+}
+
+export async function classifyWithBrowserEmbed(items, { onStatus, modelId, preferWebGPU = true } = {}) {
+  if (!items?.length) return { groups: [], ungrouped: [] };
+  const meta = getBrowserModelMeta(modelId || DEFAULT_BROWSER_MODEL);
+  if (shouldOffloadModel(meta)) {
+    const r = await offscreenRpc('classify', {
+      items,
+      opts: { modelId: meta.id, preferWebGPU, allowDownload: false },
+    }, onStatus);
+    return r?.preview || { groups: [], ungrouped: items };
+  }
+
+  const shells = [];
+  const work = [];
+  for (const t of items) {
+    if (isShellTab(t)) shells.push(t);
+    else work.push(t);
+  }
+  if (work.length < 2) {
+    return { groups: [], ungrouped: [...work, ...shells] };
+  }
+
+  const extractor = await getExtractor(meta.id, { onStatus, preferWebGPU, allowDownload: false });
+  const cluster = getClusterParams(meta);
+  const prefix = meta.textPrefix || '';
+  const texts = work.map((t) => embedText(t, prefix, cluster.prefixMinBody));
+  const vectors = [];
+  for (let i = 0; i < texts.length; i += EMBED_BATCH) {
+    const end = Math.min(i + EMBED_BATCH, texts.length);
+    onStatus?.(`编码 ${i + 1}–${end}/${texts.length}（${meta.label} · ${lastDevice}）…`);
+    const output = await extractor(texts.slice(i, end), { pooling: 'mean', normalize: true });
+    const list = output.tolist();
+    for (const row of list) vectors.push(Float32Array.from(row));
+  }
+  onStatus?.('按主题聚类…');
+  const preview = clusterPreview(work, vectors, cluster);
+  preview.ungrouped.push(...shells);
+  return preview;
+}
+
 // 仅供单测/调试
-export const __test__ = { agglomerative, buildSimMatrix, quantile, nameCluster, tokenize, cleanTitle, embedText, cosine, centralMember };
+export const __test__ = {
+  agglomerative,
+  buildSimMatrix,
+  quantile,
+  nameCluster,
+  tokenize,
+  cleanTitle,
+  embedText,
+  getClusterParams,
+  cosine,
+  centralMember,
+  isShellTab,
+  isWeakNameToken,
+  usefulPathWords,
+  isUrlTitle,
+};

@@ -1,10 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   BROWSER_MODELS,
   ensureRemoteHostPermission,
   getBrowserModelWarmState,
-  getLastEmbedDevice,
-  preloadBrowserModel,
+  listBrowserModelCache,
 } from '@/lib/chrome-ext'
 import { cn } from '@/lib/utils'
 
@@ -30,21 +29,29 @@ export function mergeClassifySettings(
   picker: ClassifySettings,
   patch: ClassifySettingsPatch,
 ): ClassifySettings {
+  const remoteModel = picker.remoteModel || {
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: '',
+    model: 'gpt-4o-mini',
+  }
   return {
     ...picker,
     ...patch,
     localModel: { ...picker.localModel, ...(patch.localModel || {}) },
     remoteModel: {
-      baseUrl: 'https://api.openai.com/v1',
-      apiKey: '',
-      model: 'gpt-4o-mini',
-      ...picker.remoteModel,
+      ...remoteModel,
       ...(patch.remoteModel || {}),
     },
   }
 }
 
 type BrowserModelMeta = { id: string; label: string; note?: string; bundled?: boolean }
+
+type CacheRow = {
+  id: string
+  state: 'bundled' | 'ready' | 'partial' | 'leftover' | 'empty'
+  hint?: string
+}
 
 type Props = {
   value: ClassifySettings
@@ -55,134 +62,67 @@ type Props = {
     },
   ) => void
   className?: string
-}
-
-type StatusPhase =
-  | 'idle'
-  | 'warm'
-  | 'checking'
-  | 'downloading'
-  | 'loading'
-  | 'ready-cache'
-  | 'ready-fresh'
-  | 'error'
-
-type Status = {
-  phase: StatusPhase
-  text: string
-  pct?: number
-  device?: string
-}
-
-function parseProgress(msg: string): Partial<Status> | null {
-  if (msg.startsWith('下载失败')) return { phase: 'error', text: msg }
-  const m = msg.match(/(\d{1,3})%/)
-  if (m) return { phase: 'downloading', text: msg, pct: Math.min(100, parseInt(m[1], 10)) }
-  if (msg.includes('WebGPU 失败') || msg.includes('回退')) {
-    return { phase: 'loading', text: msg }
-  }
-  if (msg.startsWith('加载') || msg.startsWith('编码')) {
-    return { phase: 'loading', text: msg }
-  }
-  if (msg.startsWith('下载')) return { phase: 'downloading', text: msg, pct: 4 }
-  return { phase: 'checking', text: msg }
+  /** 管理页「模型」或弹窗跳到 #models */
+  onOpenLibrary?: () => void
 }
 
 /**
- * 选中即准备。状态区分：
- * - 内存已热 / 磁盘缓存秒开 / 正在下载 / 加载进内存 / 失败
+ * 选分类方式。浏览器内小模型的下载/删除只在管理页「模型」。
  * 扩展不跑 Node；Ollama 是本机独立服务，与浏览器生命周期无关。
  */
-export function ClassifyPicker({ value, onChange, className }: Props) {
+export function ClassifyPicker({ value, onChange, className, onOpenLibrary }: Props) {
   const browserOn = value.classifyMode === 'browser'
   const ollamaOn = value.classifyMode === 'ollama'
   const openaiOn = value.classifyMode === 'openai'
-  const siteOnly = value.classifyMode === 'site'
   const quality = value.groupQuality === 'enhanced' ? 'enhanced' : 'fast'
   const remote = value.remoteModel || { baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini' }
   const meta = (BROWSER_MODELS as BrowserModelMeta[]).find((m) => m.id === value.browserModelId)
-  const [status, setStatus] = useState<Status | null>(null)
   const [permHint, setPermHint] = useState<string | null>(null)
-  const seqRef = useRef(0)
-  const sawDownloadRef = useRef(false)
+  const [modelHint, setModelHint] = useState<string | null>(null)
+  const [needLibrary, setNeedLibrary] = useState(false)
 
-  useEffect(() => {
-    if (!browserOn || !meta) {
-      setStatus(null)
+  const refreshHint = useCallback(() => {
+    if (!browserOn) {
+      setModelHint(null)
+      setNeedLibrary(false)
       return
     }
-
     const warm = getBrowserModelWarmState(value.browserModelId, value.preferWebGPU !== false)
     if (warm.warm) {
-      setStatus({
-        phase: 'warm',
-        text: `内存已就绪 · ${warm.lastDevice === 'webgpu' ? 'WebGPU' : 'WASM'}`,
-        pct: 100,
-        device: warm.lastDevice,
-      })
+      setModelHint(`内存已就绪 · ${warm.lastDevice === 'webgpu' ? 'WebGPU' : 'WASM'}`)
+      setNeedLibrary(false)
       return
     }
-
-    if (meta.bundled) {
-      setStatus({
-        phase: 'idle',
-        text: '内置模型 · 首次使用时从扩展包加载（不联网下载）',
-      })
+    if (meta?.bundled) {
+      setModelHint('内置模型 · 整理时从扩展包加载')
+      setNeedLibrary(false)
       return
     }
-
-    const seq = ++seqRef.current
-    sawDownloadRef.current = false
-    const t0 = performance.now()
-    setStatus({
-      phase: 'checking',
-      text: warm.webgpuDead
-        ? '检查本地缓存（WebGPU 近期失败，直接 WASM）…'
-        : '检查本地缓存 / 准备加载…',
-      pct: 2,
-    })
-
-    void preloadBrowserModel(value.browserModelId, {
-      preferWebGPU: value.preferWebGPU !== false,
-      onStatus: (m: string) => {
-        if (seq !== seqRef.current) return
-        const parsed = parseProgress(m)
-        if (!parsed) return
-        if (parsed.phase === 'downloading') sawDownloadRef.current = true
-        setStatus((prev) => ({
-          phase: parsed.phase || prev?.phase || 'checking',
-          text: parsed.text || prev?.text || m,
-          pct: parsed.pct ?? prev?.pct,
-          device: prev?.device,
-        }))
-      },
-    })
-      .then(() => {
-        if (seq !== seqRef.current) return
-        const device = getLastEmbedDevice()
-        const elapsed = performance.now() - t0
-        const fromCache = !sawDownloadRef.current && elapsed < 2500
-        setStatus({
-          phase: fromCache ? 'ready-cache' : 'ready-fresh',
-          text: fromCache
-            ? `已缓存 · 秒开（${device === 'webgpu' ? 'WebGPU' : 'WASM'}）`
-            : `模型已就绪（${device === 'webgpu' ? 'WebGPU' : 'WASM'}）`,
-          pct: 100,
-          device,
-        })
+    void listBrowserModelCache()
+      .then((rows: unknown) => {
+        const row = (rows as CacheRow[]).find((r) => r.id === value.browserModelId)
+        if (row?.state === 'ready') {
+          setModelHint(row.hint || '已下载 · 整理时加载')
+          setNeedLibrary(false)
+          return
+        }
+        if (row?.state === 'partial' || row?.state === 'leftover') {
+          setModelHint(row.hint || '未下完或有残留 · 到「模型」处理')
+          setNeedLibrary(true)
+          return
+        }
+        setModelHint('未下载 · 到「模型」下载后再整理')
+        setNeedLibrary(true)
       })
-      .catch((e: unknown) => {
-        if (seq !== seqRef.current) return
-        setStatus({
-          phase: 'error',
-          text: `失败：${String((e as Error)?.message || e).slice(0, 72)}`,
-        })
+      .catch(() => {
+        setModelHint('未下载 · 到「模型」下载后再整理')
+        setNeedLibrary(true)
       })
-
-    return () => {
-      seqRef.current += 1
-    }
   }, [browserOn, meta, value.browserModelId, value.preferWebGPU])
+
+  useEffect(() => {
+    refreshHint()
+  }, [refreshHint])
 
   function patchRemote(patch: Partial<ClassifySettings['remoteModel']>) {
     onChange({ remoteModel: { ...remote, ...patch } })
@@ -193,13 +133,6 @@ export function ClassifyPicker({ value, onChange, className }: Props) {
     setPermHint(ok ? null : '未授予该主机访问权限，请求会失败；可在浏览器扩展权限里允许')
   }
 
-  const showBrowserStatus = browserOn && !!status
-  const busy =
-    status &&
-    (status.phase === 'checking' ||
-      status.phase === 'downloading' ||
-      status.phase === 'loading')
-
   return (
     <div className={cn('flex min-w-0 flex-col gap-1.5', className)}>
       <div className="flex flex-wrap items-center gap-2 rounded-[11px] border border-border bg-white/60 px-2.5 py-2.5 text-xs text-muted-foreground">
@@ -208,8 +141,6 @@ export function ClassifyPicker({ value, onChange, className }: Props) {
           <select
             className="max-w-[120px] rounded-lg border border-black/15 bg-white/80 px-2 py-1 text-[13px] text-foreground"
             value={quality}
-            disabled={siteOnly}
-            title={siteOnly ? '按站点时质量档位无影响' : undefined}
             onChange={(e) =>
               onChange({ groupQuality: e.target.value === 'enhanced' ? 'enhanced' : 'fast' })
             }
@@ -222,7 +153,7 @@ export function ClassifyPicker({ value, onChange, className }: Props) {
           分类模型
           <select
             className="max-w-[200px] rounded-lg border border-black/15 bg-white/80 px-2 py-1 text-[13px] text-foreground"
-            value={value.classifyMode}
+            value={value.classifyMode === 'site' ? 'browser' : value.classifyMode}
             onChange={(e) => {
               const mode = e.target.value
               onChange({ classifyMode: mode })
@@ -230,7 +161,6 @@ export function ClassifyPicker({ value, onChange, className }: Props) {
               else setPermHint(null)
             }}
           >
-            <option value="site">按站点</option>
             <option value="browser">浏览器内小模型</option>
             <option value="gemini">Google Gemini Nano</option>
             <option value="ollama">Ollama（本机服务）</option>
@@ -271,15 +201,13 @@ export function ClassifyPicker({ value, onChange, className }: Props) {
         />
       </div>
 
-      {!siteOnly && (
-        <p className="m-0 px-0.5 text-[11px] leading-snug text-muted-foreground/80">
-          {quality === 'enhanced'
-            ? '增强：主题提示加强、域名回填；OpenAI 另含近义组合并与模型命名（更慢、更准）。'
-            : '快速：单次分类即可，分批时仍合并同名组；命名用启发式。'}
-        </p>
-      )}
+      <p className="m-0 px-0.5 text-[11px] leading-snug text-muted-foreground/80">
+        {quality === 'enhanced'
+          ? '增强：主题提示加强；OpenAI 另含近义组合并与模型命名（更慢、更准）。失败不会改回按站点。'
+          : '快速：本地全局聚类。填了下方远程 Key 时，只把每组几条标题发出去起名、剔脏。失败不会改回按站点。'}
+      </p>
 
-      {openaiOn && (
+      {(openaiOn || browserOn) && (
         <div className="flex min-w-0 flex-col gap-2 rounded-[11px] border border-border bg-white/60 px-3 py-2 text-xs text-muted-foreground">
           <label className="flex min-w-0 flex-col gap-1 font-medium text-foreground/80">
             API Base
@@ -314,7 +242,9 @@ export function ClassifyPicker({ value, onChange, className }: Props) {
             />
           </label>
           <p className="m-0 text-[11px] leading-snug text-muted-foreground/80">
-            标题与域名会发到你配置的端点；Key 仅存本机 chrome.storage.local。保存时归一到 /v1。
+            {browserOn
+              ? '可选。填了 Key，整理时只把每组 3–5 条标题发到该端点起名、剔预告/音乐/空壳。Key 只存在本机。'
+              : '标题与域名会发到你配置的端点；Key 仅存本机 chrome.storage.local。保存时归一到 /v1。'}
           </p>
           {permHint && (
             <p className="m-0 text-[11px] leading-snug text-amber-700">{permHint}</p>
@@ -322,47 +252,18 @@ export function ClassifyPicker({ value, onChange, className }: Props) {
         </div>
       )}
 
-      {showBrowserStatus && status && (
-        <div className="min-w-0 rounded-[11px] border border-border bg-white/60 px-3 py-2 text-xs">
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <span
-              className={cn(
-                'inline-flex min-w-0 items-center gap-1.5',
-                status.phase === 'error' ? 'text-red-600' : 'text-muted-foreground',
-              )}
+      {browserOn && modelHint && (
+        <div className="flex min-w-0 items-center justify-between gap-2 rounded-[11px] border border-border bg-white/60 px-3 py-2 text-xs text-muted-foreground">
+          <span className="min-w-0 leading-snug">{modelHint}</span>
+          {needLibrary && onOpenLibrary && (
+            <button
+              type="button"
+              className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-foreground/80 hover:bg-black/[0.06]"
+              onClick={onOpenLibrary}
             >
-              <span
-                className={cn(
-                  'size-1.5 shrink-0 rounded-full',
-                  status.phase === 'error'
-                    ? 'bg-red-500'
-                    : status.phase === 'ready-cache' ||
-                        status.phase === 'ready-fresh' ||
-                        status.phase === 'warm'
-                      ? 'bg-emerald-500'
-                      : status.phase === 'idle'
-                        ? 'bg-emerald-500/70'
-                        : 'animate-pulse bg-foreground/50',
-                )}
-              />
-              <span className="min-w-0 truncate tabular-nums">{status.text}</span>
-            </span>
-            {busy && (
-              <div className="h-1 w-full overflow-hidden rounded-full bg-black/[0.07]">
-                <div
-                  className="h-full rounded-full bg-foreground/60 transition-[width] duration-300"
-                  style={{
-                    width: `${status.phase === 'checking' ? 8 : (status.pct ?? 12)}%`,
-                  }}
-                />
-              </div>
-            )}
-            <p className="m-0 text-[11px] leading-snug text-muted-foreground/80">
-              {meta?.bundled
-                ? '权重随扩展提供；关页面只卸内存，不会重复安装。'
-                : '下载写入浏览器缓存；再开页面通常秒开，不会重复安装。扩展不启动 Node 进程。'}
-            </p>
-          </div>
+              去下载
+            </button>
+          )}
         </div>
       )}
 

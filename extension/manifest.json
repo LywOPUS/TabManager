@@ -11,7 +11,8 @@
     "contextMenus",
     "favicon",
     "scripting",
-    "activeTab"
+    "activeTab",
+    "offscreen"
   ],
   "host_permissions": [
     "http://127.0.0.1:11434/*",
@@ -19,6 +20,9 @@
     "https://huggingface.co/*",
     "https://*.huggingface.co/*",
     "https://cdn-lfs.huggingface.co/*",
+    "https://hf-mirror.com/*",
+    "https://*.hf.co/*",
+    "https://*.xethub.hf.co/*",
     "https://cdn.jsdelivr.net/*"
   ],
   "optional_host_permissions": [

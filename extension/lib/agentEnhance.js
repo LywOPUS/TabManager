@@ -2,9 +2,8 @@
  * 收纳后的 agent 增强：提议（分组 + 命名）与确认应用分离。
  * 在扩展页面上下文（管理页 / popup）调用；service worker 不跑模型。
  */
-import { getData, setData, newId } from './storage.js';
+import { mutateData, newId } from './storage.js';
 import { suggestGroupsSmart } from './localClassify.js';
-import { registrableDomain } from './groupHeuristics.js';
 import {
   READ_LATER_NAME,
   UNGROUPED_NAME,
@@ -80,20 +79,14 @@ function cleanName(text) {
   return stripped.slice(0, 24);
 }
 
-/** 兜底命名：最大的两个分组名，或最高频的两个域名 */
-function heuristicName(groups, items) {
+/** 会话名兜底：用模型给出的最大两个组名，不用域名 */
+function nameFromGroups(groups) {
   const sized = (groups || [])
     .filter((g) => g.name && !isReservedGroupName(g.name))
     .map((g) => ({ name: g.name, n: (g.tabIds || g.tabs || []).length }))
     .sort((a, b) => b.n - a.n);
   if (sized.length) return sized.slice(0, 2).map((g) => g.name).join(' · ');
-  const freq = new Map();
-  for (const t of items) {
-    const d = registrableDomain(t.url);
-    if (d) freq.set(d, (freq.get(d) || 0) + 1);
-  }
-  const top = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([d]) => d);
-  return top.join(' · ');
+  return '';
 }
 
 const NAME_SYSTEM =
@@ -185,10 +178,10 @@ async function nameWithGemini(titles) {
 /**
  * 生成增强提议（不写存储）：
  * - preview：分组预览（suggestGroupsSmart）
- * - name：建议会话名；opts.withName 为真且模型可用时用模型命名，否则用分组/域名启发式
+ * - name：建议会话名；opts.withName 为真且增强档时用模型命名，否则用模型组名拼接
  *
  * opts 同 suggestGroupsSmart（含 groupQuality），另加 withName?: boolean。
- * 模型命名仅在 groupQuality === 'enhanced' 时调用；快速模式用启发式命名。
+ * 模型命名仅在 groupQuality === 'enhanced' 时调用。
  * 返回 { preview, source, error, name }。
  */
 export async function proposeEnhancement(items, opts = {}, { onStatus } = {}) {
@@ -198,7 +191,7 @@ export async function proposeEnhancement(items, opts = {}, { onStatus } = {}) {
 
   let name = '';
   const useModelName = withName && opts.groupQuality === 'enhanced';
-  if (useModelName) {
+  if (useModelName && !error) {
     onStatus?.('生成会话名');
     const titles = items.slice(0, 40).map((t) => (t.title || '').slice(0, 60)).filter(Boolean);
     try {
@@ -206,10 +199,10 @@ export async function proposeEnhancement(items, opts = {}, { onStatus } = {}) {
       else if (opts.classifyMode === 'openai') name = await nameWithOpenAI(titles, opts);
       else if (opts.classifyMode === 'gemini') name = await nameWithGemini(titles);
     } catch (e) {
-      console.warn('session naming fallback', e);
+      console.warn('session naming skipped', e);
     }
   }
-  if (!name) name = heuristicName(preview.groups, items);
+  if (!name) name = nameFromGroups(preview.groups);
   return { preview, source, error, name };
 }
 
@@ -218,13 +211,13 @@ export async function proposeEnhancement(items, opts = {}, { onStatus } = {}) {
  * preview 传 null 可只改名。
  */
 export async function applyEnhancement(sessionId, { preview, name } = {}) {
-  const data = await getData();
-  const session = data.sessions.find((s) => s.id === sessionId);
-  if (!session) return { ok: false, reason: 'missing' };
-  const grouped = !!preview?.groups?.length;
-  if (grouped) applyPreviewToSession(session, preview);
-  const renamed = !!name && name !== session.name;
-  if (renamed) session.name = name;
-  await setData(data);
-  return { ok: true, grouped, renamed, name: session.name };
+  return mutateData((data) => {
+    const session = data.sessions.find((s) => s.id === sessionId);
+    if (!session) return { ok: false, reason: 'missing' };
+    const grouped = !!preview?.groups?.length;
+    if (grouped) applyPreviewToSession(session, preview);
+    const renamed = !!name && name !== session.name;
+    if (renamed) session.name = name;
+    return { ok: true, grouped, renamed, name: session.name };
+  });
 }

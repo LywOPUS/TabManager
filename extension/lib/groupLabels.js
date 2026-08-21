@@ -310,6 +310,8 @@ export function isJunkGroupName(name) {
   if ([...Object.values(SITE_LABELS)].includes(s)) return false;
   if (s.length < 2) return true;
   if (JUNK_EXACT.has(s) || JUNK_EXACT.has(s.toLowerCase())) return true;
+  if (GENERIC_TOKENS.has(s) || GENERIC_TOKENS.has(s.toLowerCase())) return true;
+  if (/^https?:\/\//i.test(s)) return true;
   if (/^[一-鿿]的$/.test(s) || /^的[一-鿿]$/.test(s)) return true;
   return false;
 }
@@ -448,6 +450,29 @@ export function tabMatchesSeed(tab, seed) {
     if (tabToks.has(tok)) return true;
   }
   return false;
+}
+
+/** 用户指定主题：标题/网址包含该词，或标题路径 token 对得上 */
+export function tabMatchesTopic(tab, query) {
+  const q = String(query || '').trim();
+  if (!q || !tab) return false;
+  const qNorm = q.replace(/^@/, '').toLowerCase();
+  if (!qNorm) return false;
+  const owner = normalizeHandle(pathOwner(tab));
+  if (owner && owner === qNorm) return true;
+  const hay = `${tab.title || ''} ${tab.url || ''}`.toLowerCase();
+  if (hay.includes(qNorm)) return true;
+  const qToks = tokenizeTitle(q);
+  const tabToks = tokensOfTab(tab);
+  for (const tok of qToks) {
+    if (tok.length < 2 || isSiteishToken(tok) || GENERIC_TOKENS.has(tok) || /^\d+$/.test(tok)) continue;
+    if (tabToks.has(tok)) return true;
+  }
+  return false;
+}
+
+export function topicGroupName(query) {
+  return String(query || '').trim().replace(/\s+/g, ' ').slice(0, 24) || '标签组';
 }
 
 /** 以当前页为种子时，新建组该叫什么 */

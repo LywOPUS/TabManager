@@ -1,9 +1,9 @@
 /**
- * 当前窗口整理计划：跨站主题组优先新建/按组名并入，站点桶仍并入已有同站组，合并同站重复组。
- * 已成组标签也可以被抽走重分。
+ * 当前窗口整理计划：按分类模型预览建组或并入同名已有组，合并同名重复原生组。
+ * 已成组标签也可以被抽走重分。不按站点规则收散标签。
  */
 import { isStashableTab } from './urls.js';
-import { groupIsSiteish, groupQualifier, isJunkGroupName, isTemplateSite, majoritySite, nameForSeedGroup, pathOwner, siteLabel, siteOfTab, tabMatchesSeed } from './groupLabels.js';
+import { groupQualifier, isJunkGroupName, isTemplateSite, majoritySite, pathOwner, siteLabel, siteOfTab } from './groupLabels.js';
 
 const TAB_GROUP_NONE = -1;
 
@@ -99,11 +99,6 @@ export function matchExistingGroup(tab, existing) {
 
 function existingClusterKey(g) {
   const title = String(g.title || '').trim();
-  const label = g.site ? siteLabel(g.site) : '';
-  if (title && label && title.toLowerCase() !== label.toLowerCase()) {
-    return `title:${title.toLowerCase()}`;
-  }
-  if (g.site) return `site:${g.site}`;
   if (title && !isJunkGroupName(title)) return `title:${title.toLowerCase()}`;
   return `id:${g.groupId}`;
 }
@@ -132,11 +127,6 @@ function tabGroupOf(tabs, none = TAB_GROUP_NONE) {
   return map;
 }
 
-function seedGroupIsExclusive(g, seed) {
-  const tabs = g?.tabs || [];
-  return tabs.length > 0 && tabs.every((t) => tabMatchesSeed(t, seed));
-}
-
 function makeAbsorbInto(absorbMap, claimed, groupOf = new Map()) {
   return (hit, tabIds, name) => {
     if (!hit || !tabIds?.length) return;
@@ -160,47 +150,80 @@ function makeAbsorbInto(absorbMap, claimed, groupOf = new Map()) {
   };
 }
 
+function previewGroupIds(group) {
+  const ids = new Set();
+  for (const id of group?.tabIds || []) ids.add(String(id));
+  for (const t of group?.tabs || []) {
+    if (t?.id != null) ids.add(String(t.id));
+    if (typeof t?.tabId === 'number') ids.add(String(t.tabId));
+  }
+  return ids;
+}
+
+export function previewGroupHasTab(group, tab) {
+  const ids = previewGroupIds(group);
+  const id = chromeTabId(tab);
+  if (id != null && ids.has(String(id))) return true;
+  return tab?.id != null && ids.has(String(tab.id));
+}
+
+/** 分类预览里包含种子页、且至少 2 条的那一组 */
+export function pickSeedGroupFromPreview(preview, seed) {
+  const groups = (preview?.groups || []).filter((g) => (g.tabs?.length || g.tabIds?.length || 0) >= 2);
+  return groups.find((g) => previewGroupHasTab(g, seed)) || null;
+}
+
+/** 分类预览里组名对得上用户主题的那一组（先精确，再包含） */
+export function pickTopicGroupFromPreview(preview, query) {
+  const q = normName(query).replace(/\s+/g, '');
+  if (!q) return null;
+  const groups = (preview?.groups || []).filter((g) => (g.tabs?.length || g.tabIds?.length || 0) >= 2);
+  const scored = [];
+  for (const g of groups) {
+    const n = normName(g.name).replace(/\s+/g, '');
+    if (!n) continue;
+    if (n === q) scored.push({ g, rank: 0 });
+    else if (n.includes(q) || q.includes(n)) scored.push({ g, rank: 1 });
+  }
+  scored.sort((a, b) => a.rank - b.rank || (b.g.tabs?.length || 0) - (a.g.tabs?.length || 0));
+  return scored[0]?.g || null;
+}
+
+export function tabsForPreviewGroup(tabs, group) {
+  const ids = previewGroupIds(group);
+  return stashableTabs(tabs).filter((t) => {
+    const id = chromeTabId(t);
+    return (id != null && ids.has(String(id))) || (t?.id != null && ids.has(String(t.id)));
+  });
+}
+
 /**
- * 只按当前页收同作者 / 同主题，可从已有标签组抽走匹配项，不动其余标签。
- * @param {object[]} windowTabs
- * @param {Array<{ groupId: number, title?: string }>} existingMeta
- * @param {number} [none]
- * @param {object|null} seedTab
+ * 只把模型选出的标签收成一组（可从已有组抽走），不动其余标签。
  */
-export function planSeedOrganize(windowTabs, existingMeta, none = TAB_GROUP_NONE, seedTab = null) {
+export function planMatchedOrganize(windowTabs, existingMeta, none = TAB_GROUP_NONE, matches = [], name = '') {
+  const title = String(name || '').trim() || '分组';
   const existing = decorateExistingGroups(windowTabs, existingMeta, none);
   const groupOf = tabGroupOf(windowTabs, none);
   const absorbMap = new Map();
   const claimed = new Set();
   const absorbInto = makeAbsorbInto(absorbMap, claimed, groupOf);
   const create = [];
-  const seed = seedTab && isStashableTab(seedTab) ? seedTab : null;
-  if (seed) {
-    const seedId = chromeTabId(seed);
-    const matches = stashableTabs(windowTabs).filter((t) => tabMatchesSeed(t, seed));
-    const seedGrouped = seedId != null
-      ? existing.find((g) => g.tabs.some((t) => chromeTabId(t) === seedId))
-      : null;
-    if (seedGrouped && seedGroupIsExclusive(seedGrouped, seed)) {
-      const ids = matches.map((t) => chromeTabId(t)).filter((id) => id != null && id !== seedId);
-      absorbInto(seedGrouped, ids, seedGrouped.title || nameForSeedGroup(seed, matches));
-    } else if (matches.length >= 2) {
-      const tabIds = matches.map((t) => chromeTabId(t)).filter((id) => id != null && !claimed.has(id));
-      if (tabIds.length >= 2) {
-        create.push({ name: nameForSeedGroup(seed, matches), tabIds });
-        for (const id of tabIds) claimed.add(id);
-      }
+  const picked = stashableTabs(matches);
+  if (picked.length >= 2) {
+    const hit = existing.find((g) => normName(g.title) === normName(title));
+    const tabIds = picked.map((t) => chromeTabId(t)).filter((id) => id != null);
+    if (hit) {
+      absorbInto(hit, tabIds, title);
+    } else if (tabIds.length >= 2) {
+      create.push({ name: title, tabIds });
+      for (const id of tabIds) claimed.add(id);
     }
   }
-  const leftovers = stashableTabs(windowTabs).filter((t) => {
-    if (typeof t.id !== 'number' || claimed.has(t.id)) return false;
-    return true;
-  });
   return {
     absorb: [...absorbMap.values()].filter((a) => a.tabIds.length),
     create,
     merge: [],
-    leftoverCount: leftovers.length,
+    leftoverCount: stashableTabs(windowTabs).filter((t) => typeof t.id === 'number' && !claimed.has(t.id)).length,
   };
 }
 
@@ -208,9 +231,12 @@ export function planSeedOrganize(windowTabs, existingMeta, none = TAB_GROUP_NONE
  * @param {object[]} windowTabs
  * @param {Array<{ groupId: number, title?: string }>} existingMeta
  * @param {{ groups?: Array<{ name: string, tabs?: object[] }> }} leftoverPreview  本窗可收纳标签的分类结果（含已成组）
+ * @param {number} [none]
+ * @param {{ mergeExisting?: boolean }} [opts]  选中整理传 mergeExisting:false，不合并未选中的同名组
  */
-export function planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none = TAB_GROUP_NONE) {
+export function planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none = TAB_GROUP_NONE, opts = {}) {
   const existing = decorateExistingGroups(windowTabs, existingMeta, none);
+  const mergeExisting = opts.mergeExisting !== false;
 
   const merge = [];
   const clusters = new Map();
@@ -223,7 +249,7 @@ export function planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none
   for (const groups of clusters.values()) {
     const keep = largest(groups);
     keepGroups.push(keep);
-    if (groups.length < 2) continue;
+    if (!mergeExisting || groups.length < 2) continue;
     const tabIds = [];
     for (const g of groups) {
       if (g.groupId === keep.groupId) continue;
@@ -250,20 +276,14 @@ export function planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none
   const create = [];
 
   for (const g of leftoverPreview?.groups || []) {
-    const tabIds = chromeTabIds(g.tabs).filter((id) => !claimed.has(id));
+    const fromTabs = chromeTabIds(g.tabs);
+    const fromIds = (g.tabIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id >= 0);
+    const tabIds = [...new Set(fromTabs.length ? fromTabs : fromIds)].filter((id) => !claimed.has(id));
     if (!tabIds.length) continue;
     const byTitle = keepGroups.filter((e) => e.title && normName(e.title) === normName(g.name));
     if (byTitle.length) {
       absorbInto(largest(byTitle), tabIds, g.name);
       continue;
-    }
-    if (groupIsSiteish(g)) {
-      const site = majoritySite(g.tabs);
-      const bySite = keepGroups.filter((e) => e.site && site && e.site === site);
-      if (bySite.length) {
-        absorbInto(largest(bySite), tabIds, g.name);
-        continue;
-      }
     }
     if (tabIds.length >= 2) {
       create.push({ name: g.name || '未命名', tabIds });
@@ -271,17 +291,7 @@ export function planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none
     }
   }
 
-  for (const t of stashableTabs(windowTabs)) {
-    if (typeof t.id !== 'number' || claimed.has(t.id)) continue;
-    const hit = matchExistingGroup(t, keepGroups);
-    if (!hit || t.groupId === hit.groupId) continue;
-    absorbInto(hit, [t.id], hit.title);
-  }
-
-  const leftovers = stashableTabs(windowTabs).filter((t) => {
-    if (typeof t.id !== 'number' || claimed.has(t.id)) return false;
-    return !matchExistingGroup(t, keepGroups);
-  });
+  const leftovers = stashableTabs(windowTabs).filter((t) => typeof t.id === 'number' && !claimed.has(t.id));
 
   return {
     absorb: [...absorbMap.values()].filter((a) => a.tabIds.length),
@@ -289,6 +299,11 @@ export function planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none
     merge,
     leftoverCount: leftovers.length,
   };
+}
+
+/** 只整理预览里的标签：可并入同名已有组，不合并窗口里其它同名组。 */
+export function planSelectedOrganize(windowTabs, existingMeta, selectedPreview, none = TAB_GROUP_NONE) {
+  return planLiveOrganize(windowTabs, existingMeta, selectedPreview, none, { mergeExisting: false });
 }
 
 export function previewFromPlan(plan, windowTabs) {

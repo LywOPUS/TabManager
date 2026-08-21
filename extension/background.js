@@ -1,12 +1,15 @@
 import { stashCurrentWindow, stashAllWindows } from './lib/stash.js';
-import { organizeCurrentWindow, organizeAroundCurrentPage, mergeAndOrganizeCurrent } from './lib/liveOrganize.js';
+import { jobStatusFn, runOrganizeJob } from './lib/bgJobs.js';
 import { getSettings } from './lib/settings.js';
+import { ensureOffscreen } from './lib/offscreenRuntime.js';
 
 const MENU = {
   STASH_WINDOW: 'stash-window',
   STASH_ALL: 'stash-all',
   ORGANIZE_WINDOW: 'organize-window',
+  ORGANIZE_SELECTED: 'organize-selected',
   ORGANIZE_AROUND: 'organize-around',
+  RELATED_NEW_WINDOW: 'related-new-window',
   MERGE_ORGANIZE: 'merge-organize',
 };
 
@@ -61,8 +64,18 @@ function setupContextMenus() {
       contexts: CTX,
     });
     chrome.contextMenus.create({
+      id: MENU.ORGANIZE_SELECTED,
+      title: '整理选中的标签',
+      contexts: CTX,
+    });
+    chrome.contextMenus.create({
       id: MENU.ORGANIZE_AROUND,
       title: '按当前页归组',
+      contexts: CTX,
+    });
+    chrome.contextMenus.create({
+      id: MENU.RELATED_NEW_WINDOW,
+      title: '相关标签到新窗口',
       contexts: CTX,
     });
     chrome.contextMenus.create({
@@ -86,11 +99,17 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
     } else if (info.menuItemId === MENU.STASH_ALL) {
       await flashStashBadge(await stashAllWindows({ keepActive: true }));
     } else if (info.menuItemId === MENU.ORGANIZE_WINDOW) {
-      const r = await organizeCurrentWindow();
+      const r = await runOrganizeJob('window');
+      await flashStashBadge({ ok: !!r?.ok, count: r?.apply?.created ?? 0 });
+    } else if (info.menuItemId === MENU.ORGANIZE_SELECTED) {
+      const r = await runOrganizeJob('selected');
       await flashStashBadge({ ok: !!r?.ok, count: r?.apply?.created ?? 0 });
     } else if (info.menuItemId === MENU.ORGANIZE_AROUND) {
-      const r = await organizeAroundCurrentPage();
+      const r = await runOrganizeJob('around');
       await flashStashBadge({ ok: !!r?.ok, count: (r?.apply?.created ?? 0) + (r?.apply?.absorbTabs ?? 0) });
+    } else if (info.menuItemId === MENU.RELATED_NEW_WINDOW) {
+      const r = await runOrganizeJob('related');
+      await flashStashBadge({ ok: !!r?.ok, count: r?.moved ?? 0 });
     } else if (info.menuItemId === MENU.MERGE_ORGANIZE) {
       await openManagement('#merge');
     }
@@ -120,38 +139,85 @@ chrome.commands.onCommand.addListener(async (command) => {
   }
 });
 
+function organizeJobOf(msg) {
+  if (msg?.job || msg?.op) return msg.job || msg.op;
+  return {
+    'tm-organize': 'window',
+    ORGANIZE: 'window',
+    ORGANIZE_CURRENT_WINDOW: 'window',
+    ORGANIZE_AROUND_CURRENT: 'around',
+    MOVE_RELATED_NEW_WINDOW: 'related',
+    MERGE_ORGANIZE: 'merge',
+  }[msg?.type];
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  const type = msg?.type;
+  // 转给 offscreen / 弹窗的消息，以及不认识的消息，都不能回包。
+  if (
+    type === 'tm-offscreen'
+    || type === 'tm-model-status'
+    || type === 'tm-job-status'
+  ) {
+    return false;
+  }
+  const job = organizeJobOf(msg);
+  const isOrganize = type === 'tm-organize' || type === 'ORGANIZE' || !!job && (
+    type === 'ORGANIZE_CURRENT_WINDOW'
+    || type === 'ORGANIZE_AROUND_CURRENT'
+    || type === 'MOVE_RELATED_NEW_WINDOW'
+    || type === 'MERGE_ORGANIZE'
+  );
+  if (!isOrganize && type !== 'STASH_CURRENT_WINDOW' && type !== 'STASH_ALL_WINDOWS' && type !== 'OPEN_MANAGEMENT' && type !== 'tm-model') {
+    return false;
+  }
   (async () => {
-    switch (msg.type) {
-      case 'STASH_CURRENT_WINDOW': {
+    try {
+      if (type === 'STASH_CURRENT_WINDOW') {
         const keepActive = msg.keepActive !== false;
         const r = await stashCurrentWindow({ keepActive });
         if (r.ok && msg.reviewInTab) {
           await openManagement(`#review=${encodeURIComponent(r.session.id)}`);
         }
         sendResponse(r);
-        break;
+        return;
       }
-      case 'STASH_ALL_WINDOWS': {
-        const keepActive = msg.keepActive !== false;
-        sendResponse(await stashAllWindows({ keepActive }));
-        break;
+      if (type === 'STASH_ALL_WINDOWS') {
+        sendResponse(await stashAllWindows({ keepActive: msg.keepActive !== false }));
+        return;
       }
-      case 'ORGANIZE_CURRENT_WINDOW':
-        sendResponse(await organizeCurrentWindow());
-        break;
-      case 'ORGANIZE_AROUND_CURRENT':
-        sendResponse(await organizeAroundCurrentPage());
-        break;
-      case 'MERGE_ORGANIZE':
-        sendResponse(await mergeAndOrganizeCurrent());
-        break;
-      case 'OPEN_MANAGEMENT':
+      if (type === 'OPEN_MANAGEMENT') {
         await openManagement(typeof msg.hash === 'string' ? msg.hash : '');
         sendResponse({ ok: true });
-        break;
-      default:
-        sendResponse({ ok: false, error: 'unknown' });
+        return;
+      }
+      if (type === 'tm-model') {
+        await ensureOffscreen();
+        let last = new Error('模型运行页未就绪');
+        let res;
+        for (let i = 0; i < 8; i += 1) {
+          try {
+            res = await chrome.runtime.sendMessage({
+              type: 'tm-offscreen',
+              op: msg.op,
+              reqId: msg.reqId,
+              items: msg.items,
+              opts: msg.opts,
+              modelId: msg.modelId,
+              preferWebGPU: msg.preferWebGPU,
+            });
+            if (res !== undefined) break;
+          } catch (e) {
+            last = e instanceof Error ? e : new Error(String(e));
+            await new Promise((r) => setTimeout(r, 80 * (i + 1)));
+          }
+        }
+        sendResponse(res ?? { error: last.message });
+        return;
+      }
+      sendResponse(await runOrganizeJob(job, { query: msg.query }, jobStatusFn(msg.reqId)));
+    } catch (e) {
+      sendResponse({ ok: false, reason: 'classify_failed', error: String(e?.message || e) });
     }
   })();
   return true;

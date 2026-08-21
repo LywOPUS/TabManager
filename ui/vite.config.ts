@@ -1,3 +1,4 @@
+import { rmSync } from 'node:fs'
 import path from 'path'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
@@ -6,7 +7,17 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   root: path.resolve(__dirname),
   base: './',
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    {
+      name: 'clean-ui-output',
+      apply: 'build',
+      buildStart() {
+        rmSync(path.resolve(__dirname, '../extension/mgmt'), { recursive: true, force: true })
+      },
+    },
+    react(),
+    tailwindcss(),
+  ],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, 'src'),

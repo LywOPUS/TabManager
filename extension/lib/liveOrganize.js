@@ -2,10 +2,14 @@ import { isStashableTab } from './urls.js';
 import { suggestGroupsSmart } from './localClassify.js';
 import { classifyOptsFromSettings, getSettings } from './settings.js';
 import {
+  pickSeedGroupFromPreview,
+  pickTopicGroupFromPreview,
   planHasWork,
   planLiveOrganize,
-  planSeedOrganize,
+  planMatchedOrganize,
+  planSelectedOrganize,
   previewFromPlan,
+  tabsForPreviewGroup,
 } from './liveOrganizePlan.js';
 
 // 组名收尾（X 显示名、套话残词）在 groupLabels.js，经 suggestGroupsSmart 统一走。
@@ -15,7 +19,11 @@ const MOVE_CHUNK = 12;
 export const TAB_GROUP_NONE = -1;
 
 function liveItem(tab) {
-  return { id: String(tab.id), title: tab.title || tab.url, url: tab.url, tabId: tab.id };
+  const title = String(tab.title || '').trim();
+  const url = tab.url || '';
+  // 未加载页常把网址当标题；不要把 http/https 写进组名文本
+  const looksUrl = /^https?:\/\//i.test(title);
+  return { id: String(tab.id), title: looksUrl ? '' : title, url, tabId: tab.id };
 }
 
 export function isNativeUngrouped(tab, none = TAB_GROUP_NONE) {
@@ -31,6 +39,11 @@ export function tabsForWindowOrganize(tabs) {
 /** 仅未成组、可收纳的标签。 */
 export function tabsForCurrentWindowOrganize(tabs, none = TAB_GROUP_NONE) {
   return tabsForWindowOrganize(tabs).filter((t) => isNativeUngrouped(t, none));
+}
+
+/** 标签栏多选（highlighted）且可收纳。 */
+export function tabsForSelectedOrganize(tabs) {
+  return tabsForWindowOrganize(tabs).filter((t) => t.highlighted);
 }
 
 export function resolveChromeTabId(tab) {
@@ -353,13 +366,16 @@ export async function getWindowOrganizePreview(windowId, onStatus) {
   const stashable = tabsForWindowOrganize(windowTabs);
 
   let leftoverPreview = { groups: [], ungrouped: stashable };
-  let source = 'heuristic';
+  let source = 'empty';
   let error;
   if (stashable.length >= 2) {
     const r = await previewLiveOrganizeSmart(stashable, onStatus);
     leftoverPreview = r.preview;
     source = r.source;
     error = r.error;
+    if (error && !leftoverPreview?.groups?.length) {
+      return { ok: false, reason: 'classify_failed', windowId, source, error };
+    }
   }
 
   const plan = planLiveOrganize(windowTabs, existingMeta, leftoverPreview, none);
@@ -413,25 +429,94 @@ export async function organizeCurrentWindow(onProgress) {
   return organizeWindow(windowId, onProgress);
 }
 
-export async function getWindowSeedOrganizePreview(windowId) {
+export async function summarizeHighlightedTabs() {
+  const windowId = await getLastFocusedNormalWindowId();
+  if (windowId == null) return { count: 0 };
+  const selected = tabsForSelectedOrganize(await chrome.tabs.query({ windowId, highlighted: true }));
+  return { count: selected.length };
+}
+
+export async function getSelectedOrganizePreview(windowId, onStatus) {
   if (typeof windowId !== 'number') return { ok: false, reason: 'no_window' };
   const none = chrome.tabGroups?.TAB_GROUP_ID_NONE ?? TAB_GROUP_NONE;
   const windowTabs = await chrome.tabs.query({ windowId });
   const existingMeta = await loadExistingGroupMeta(windowTabs, none);
-  const [seedTab] = await chrome.tabs.query({ windowId, active: true });
-  if (!isStashableTab(seedTab)) {
-    return { ok: false, reason: 'no_seed', windowId, source: 'seed' };
+  const selected = tabsForSelectedOrganize(windowTabs);
+  if (selected.length < 2) {
+    return { ok: false, reason: 'no_selection', windowId, count: selected.length };
   }
-  const plan = planSeedOrganize(windowTabs, existingMeta, none, seedTab);
+
+  const r = await previewLiveOrganizeSmart(selected, onStatus);
+  if (r.error && !r.preview?.groups?.length) {
+    return { ok: false, reason: 'classify_failed', windowId, source: r.source, error: r.error };
+  }
+
+  const plan = planSelectedOrganize(windowTabs, existingMeta, r.preview, none);
   if (!planHasWork(plan)) {
-    return { ok: false, reason: 'no_seed_match', windowId, source: 'seed' };
+    return { ok: false, reason: 'no_groups', windowId, source: r.source, error: r.error, count: selected.length };
   }
   return {
     ok: true,
     preview: previewFromPlan(plan, windowTabs),
     plan,
     windowId,
-    source: 'seed',
+    source: r.source,
+    error: r.error,
+    count: selected.length,
+  };
+}
+
+/** 弹窗 / 右键：只整理标签栏多选的标签，不碰其余页 */
+export async function organizeSelectedTabs(onProgress) {
+  const windowId = await getLastFocusedNormalWindowId();
+  if (windowId == null) return { ok: false, reason: 'no_window' };
+  onProgress?.('整理选中标签');
+  const r = await getSelectedOrganizePreview(windowId, onProgress);
+  if (!r.ok) return r;
+  const applied = await applyLivePlan(windowId, r.plan, onProgress);
+  if (!applied.ok) {
+    return {
+      ok: false,
+      reason: applied.reason || 'apply_failed',
+      preview: r.preview,
+      plan: r.plan,
+      source: r.source,
+      count: r.count,
+      apply: applied,
+    };
+  }
+  return { ok: true, preview: r.preview, plan: r.plan, source: r.source, count: r.count, apply: applied };
+}
+
+export async function getWindowSeedOrganizePreview(windowId, onStatus) {
+  if (typeof windowId !== 'number') return { ok: false, reason: 'no_window' };
+  const none = chrome.tabGroups?.TAB_GROUP_ID_NONE ?? TAB_GROUP_NONE;
+  const windowTabs = await chrome.tabs.query({ windowId });
+  const existingMeta = await loadExistingGroupMeta(windowTabs, none);
+  const [seedTab] = await chrome.tabs.query({ windowId, active: true });
+  if (!isStashableTab(seedTab)) {
+    return { ok: false, reason: 'no_seed', windowId };
+  }
+  const stashable = tabsForWindowOrganize(windowTabs);
+  if (stashable.length < 2) {
+    return { ok: false, reason: 'no_seed_match', windowId };
+  }
+  const r = await previewLiveOrganizeSmart(stashable, onStatus);
+  if (r.error && !r.preview?.groups?.length) {
+    return { ok: false, reason: 'classify_failed', windowId, source: r.source, error: r.error };
+  }
+  const group = pickSeedGroupFromPreview(r.preview, seedTab);
+  const matches = tabsForPreviewGroup(windowTabs, group);
+  const plan = planMatchedOrganize(windowTabs, existingMeta, none, matches, group?.name);
+  if (!planHasWork(plan)) {
+    return { ok: false, reason: 'no_seed_match', windowId, source: r.source };
+  }
+  return {
+    ok: true,
+    preview: previewFromPlan(plan, windowTabs),
+    plan,
+    windowId,
+    source: r.source,
   };
 }
 
@@ -440,7 +525,7 @@ export async function organizeAroundCurrentPage(onProgress) {
   const windowId = await getLastFocusedNormalWindowId();
   if (windowId == null) return { ok: false, reason: 'no_window' };
   onProgress?.('按当前页归组');
-  const r = await getWindowSeedOrganizePreview(windowId);
+  const r = await getWindowSeedOrganizePreview(windowId, onProgress);
   if (!r.ok) return r;
   const applied = await applyLivePlan(windowId, r.plan, onProgress);
   if (!applied.ok) {
@@ -454,6 +539,184 @@ export async function organizeAroundCurrentPage(onProgress) {
     };
   }
   return { ok: true, preview: r.preview, plan: r.plan, source: r.source, apply: applied };
+}
+
+export async function organizeByTopic(query, onProgress) {
+  const q = String(query || '').trim();
+  if (!q) return { ok: false, reason: 'no_topic' };
+  const windowId = await getLastFocusedNormalWindowId();
+  if (windowId == null) return { ok: false, reason: 'no_window' };
+  onProgress?.(`按「${q.slice(0, 24)}」归组`);
+  const none = chrome.tabGroups?.TAB_GROUP_ID_NONE ?? TAB_GROUP_NONE;
+  const windowTabs = await chrome.tabs.query({ windowId });
+  const existingMeta = await loadExistingGroupMeta(windowTabs, none);
+  const stashable = tabsForWindowOrganize(windowTabs);
+  if (stashable.length < 2) return { ok: false, reason: 'no_topic_match', windowId };
+  const r = await previewLiveOrganizeSmart(stashable, onProgress);
+  if (r.error && !r.preview?.groups?.length) {
+    return { ok: false, reason: 'classify_failed', windowId, source: r.source, error: r.error };
+  }
+  const group = pickTopicGroupFromPreview(r.preview, q);
+  const matches = tabsForPreviewGroup(windowTabs, group);
+  const plan = planMatchedOrganize(windowTabs, existingMeta, none, matches, group?.name || q);
+  if (!planHasWork(plan)) return { ok: false, reason: 'no_topic_match', windowId, source: r.source };
+  const preview = previewFromPlan(plan, windowTabs);
+  const applied = await applyLivePlan(windowId, plan, onProgress);
+  if (!applied.ok) {
+    return {
+      ok: false,
+      reason: applied.reason || 'apply_failed',
+      preview,
+      plan,
+      source: r.source,
+      apply: applied,
+    };
+  }
+  return { ok: true, preview, plan, source: r.source, apply: applied, topic: q };
+}
+
+let relatedPickCache = null;
+
+function relatedFingerprint(tabs, seedId) {
+  const ids = (tabs || [])
+    .map((t) => t.id)
+    .filter((id) => typeof id === 'number')
+    .sort((a, b) => a - b);
+  return `${seedId}:${ids.join(',')}`;
+}
+
+async function classifyRelatedPick(onStatus) {
+  const windowId = await getLastFocusedNormalWindowId();
+  if (windowId == null) return { ok: false, reason: 'no_window' };
+  const [seed] = await chrome.tabs.query({ windowId, active: true });
+  if (!isStashableTab(seed) || typeof seed.id !== 'number') {
+    return { ok: false, reason: 'no_seed' };
+  }
+  const allWindows = await chrome.windows.getAll({ populate: true, windowTypes: ['normal'] });
+  const allTabs = allWindows.flatMap((w) => w.tabs || []);
+  const stashable = tabsForWindowOrganize(allTabs);
+  const fp = relatedFingerprint(stashable, seed.id);
+  if (relatedPickCache?.fp === fp) return relatedPickCache;
+
+  if (stashable.length < 2) {
+    relatedPickCache = { fp, ok: false, reason: 'no_seed_match', count: 0, name: '', matches: [], seed };
+    return relatedPickCache;
+  }
+  const r = await previewLiveOrganizeSmart(stashable, onStatus);
+  if (r.error && !r.preview?.groups?.length) {
+    relatedPickCache = {
+      fp,
+      ok: false,
+      reason: 'classify_failed',
+      error: r.error,
+      source: r.source,
+      count: 0,
+      name: '',
+      matches: [],
+      seed,
+    };
+    return relatedPickCache;
+  }
+  const group = pickSeedGroupFromPreview(r.preview, seed);
+  const matches = tabsForPreviewGroup(allTabs, group);
+  const name = group?.name || '';
+  relatedPickCache = {
+    fp,
+    ok: matches.length >= 2,
+    reason: matches.length >= 2 ? undefined : 'no_seed_match',
+    source: r.source,
+    count: matches.length,
+    name,
+    matches,
+    seed,
+  };
+  return relatedPickCache;
+}
+
+export async function relatedToNewWindowSummary(onStatus) {
+  const pick = await classifyRelatedPick(onStatus);
+  if (pick.reason === 'no_window') return null;
+  return {
+    count: pick.count || 0,
+    name: pick.name || '',
+    reason: pick.reason,
+    error: pick.error,
+    source: pick.source,
+  };
+}
+
+export async function moveRelatedToNewWindow(onProgress) {
+  const pick = await classifyRelatedPick(onProgress);
+  if (!pick.ok) {
+    return { ok: false, reason: pick.reason || 'no_seed_match', error: pick.error, source: pick.source };
+  }
+  const { seed, matches, name } = pick;
+  if (!isStashableTab(seed) || typeof seed.id !== 'number') {
+    return { ok: false, reason: 'no_seed' };
+  }
+  relatedPickCache = null;
+  onProgress?.(`移到新窗口「${name}」`);
+  let win;
+  try {
+    win = await chrome.windows.create({ tabId: seed.id, focused: true });
+  } catch (e) {
+    return { ok: false, reason: 'apply_failed', error: String(e?.message || e) };
+  }
+  const newWindowId = win?.id;
+  if (typeof newWindowId !== 'number') return { ok: false, reason: 'no_window' };
+
+  const others = matches
+    .map((t) => t.id)
+    .filter((id) => typeof id === 'number' && id !== seed.id);
+  const byWin = new Map();
+  for (const id of others) {
+    try {
+      const t = await chrome.tabs.get(id);
+      if (t.windowId === newWindowId || t.pinned || !isStashableTab(t)) continue;
+      if (!byWin.has(t.windowId)) byWin.set(t.windowId, []);
+      byWin.get(t.windowId).push(id);
+    } catch {
+      /* 标签已关 */
+    }
+  }
+  let moved = 1;
+  for (const ids of byWin.values()) {
+    for (let i = 0; i < ids.length; i += MOVE_CHUNK) {
+      const chunk = ids.slice(i, i + MOVE_CHUNK);
+      onProgress?.(`移动标签 ${moved + chunk.length}/${matches.length}`);
+      try {
+        await chrome.tabs.move(chunk, { windowId: newWindowId, index: -1 });
+        moved += chunk.length;
+      } catch {
+        /* 单批失败则跳过 */
+      }
+      await yieldUi(16);
+    }
+  }
+
+  const alive = await aliveTabIdsInWindow(
+    matches.map((t) => t.id).filter((id) => typeof id === 'number'),
+    newWindowId,
+  );
+  if (alive.length >= 2) {
+    try {
+      const groupId = await chrome.tabs.group({
+        tabIds: alive,
+        createProperties: { windowId: newWindowId },
+      });
+      await chrome.tabGroups.update(groupId, { title: name, color: 'cyan' });
+    } catch (e) {
+      return {
+        ok: false,
+        reason: 'partial',
+        moved,
+        name,
+        windowId: newWindowId,
+        error: String(e?.message || e),
+      };
+    }
+  }
+  return { ok: true, moved, name, windowId: newWindowId, source: 'seed' };
 }
 
 export async function mergeOrganizeSummary() {
@@ -516,7 +779,10 @@ export async function mergeAndOrganizeCurrent(opts = {}) {
   if (tabs.length < 2) return { ok: false, reason: 'too_few', summary };
 
   onProgress('生成分组建议…');
-  const { preview, source } = await previewLiveOrganizeSmart(tabs, onProgress);
+  const { preview, source, error } = await previewLiveOrganizeSmart(tabs, onProgress);
+  if (error && !preview?.groups?.length) {
+    return { ok: false, reason: 'classify_failed', error, summary, source };
+  }
   if (!preview.groups.length) return { ok: false, reason: 'no_groups', summary, source };
 
   const applied = await applyNativeGroups(targetWindowId, preview, onProgress, {

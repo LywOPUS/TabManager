@@ -1,6 +1,6 @@
 /**
- * 管理页：会话列表、搜索、预览整理/跨窗合并、已收纳去重、闲置、分类、导入导出。
- * 弹窗对打开的标签立刻动手（整理/合并窗口/解散标签组/打开标签去重），见 popup/PopupApp.tsx。
+ * 管理页：会话是主体（搜索 / 恢复 / 建议分组）。顶栏：收纳、打开标签整理与清理、分类与导入导出。
+ * 弹窗对打开的标签立刻动手，见 popup/PopupApp.tsx。
  */
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { GlassButton } from '@/components/ui/glasscn/glass-button'
@@ -12,6 +12,7 @@ import {
   mergeClassifySettings,
   type ClassifySettings,
 } from '@/components/ClassifyPicker'
+import { ModelLibrary } from '@/components/ModelLibrary'
 import { timeAgo } from '@/lib/timeAgo'
 import { ToastProvider, useToast } from '@/hooks/useToast'
 import { JetBrainsAmbient } from '@/components/JetBrainsAmbient'
@@ -44,6 +45,7 @@ import {
   ensureFixedGroups,
   mergeAndOrganizeCurrent,
   mergeImport,
+  mutateData,
   mergeOrganizeSummary,
   organizeOkText,
   moveTabToGroup,
@@ -52,13 +54,14 @@ import {
   dissolveOkText,
   dissolvePrompt,
   newId,
+  classifyModeLabel,
   classifyOptsFromSettings,
   proposeEnhancement,
   removeDuplicates,
   restoreGroup,
   restoreSessionGroups,
-  setData,
   setSettings,
+  organizeFailText,
   sourceLabel,
   tabCount,
   tabsForSuggest,
@@ -444,6 +447,7 @@ function ManagementApp() {
   const [query, setQuery] = useState('')
   const [stashBusy, setStashBusy] = useState(false)
   const [showClassify, setShowClassify] = useState(false)
+  const [showModels, setShowModels] = useState(false)
   const importRef = useRef<HTMLInputElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const bootRef = useRef(false)
@@ -491,8 +495,15 @@ function ManagementApp() {
       ensureFixedGroups(s, { newId })
       if (!hadReadLater || !hadUngrouped) dirty = true
     }
-    if (dirty) await setData(data)
-    setSessions(data.sessions)
+    if (dirty) {
+      const sessions = await mutateData((latest) => {
+        for (const session of latest.sessions) ensureFixedGroups(session, { newId })
+        return latest.sessions
+      })
+      setSessions(sessions)
+    } else {
+      setSessions(data.sessions)
+    }
   }, [])
 
   const closeModal = useCallback(() => setModal({ kind: 'none' }), [])
@@ -524,6 +535,12 @@ function ManagementApp() {
     setModal({ kind: 'merge', summary, picker: s, progress: '', busy: false })
   }
 
+  function openModelLibrary() {
+    setModal({ kind: 'none' })
+    setShowClassify(false)
+    setShowModels(true)
+  }
+
   useEffect(() => {
     if (bootRef.current) return
     bootRef.current = true
@@ -537,10 +554,14 @@ function ManagementApp() {
           hash === '#organize' ||
           hash === '#dedup' ||
           hash === '#usage' ||
+          hash === '#models' ||
           hash.startsWith('#review=')
         ) {
           history.replaceState(null, '', location.pathname + location.search)
-          if (hash === '#merge') await openMerge()
+          if (hash === '#models') {
+            setShowModels(true)
+            setShowClassify(false)
+          } else if (hash === '#merge') await openMerge()
           else if (hash === '#organize') await openLive()
           else if (hash === '#dedup') await openDedup()
           else if (hash === '#usage') await openUsage()
@@ -554,9 +575,9 @@ function ManagementApp() {
         }
       } catch {
         setSettingsState({
-          classifyMode: 'site',
+          classifyMode: 'browser',
           groupQuality: 'fast',
-          browserModelId: 'Xenova/all-MiniLM-L6-v2',
+          browserModelId: 'onnx-community/embeddinggemma-300m-ONNX',
           preferWebGPU: true,
           localModel: { model: 'qwen2.5:0.5b' },
           remoteModel: {
@@ -785,10 +806,7 @@ function ManagementApp() {
     setModal({ ...modal, removing: true })
     const openGroups = await findOpenTabDuplicates()
     const closed = await closeOpenTabDuplicates(openGroups)
-    const data = await getData()
-    const stashGroups = findDuplicates(data)
-    const removed = removeDuplicates(data, stashGroups)
-    if (removed) await setData(data)
+    const removed = await mutateData((data) => removeDuplicates(data, findDuplicates(data)))
     setModal({ kind: 'none' })
     await reload()
     if (!closed && !removed) toast('没有重复可合并')
@@ -810,17 +828,20 @@ function ManagementApp() {
   }
 
   async function deleteOneTab(sessionId: string, groupId: string, tabId: string) {
-    const data = await getData()
-    const session = data.sessions.find((s: Session) => s.id === sessionId)
-    if (!session) return
-    const group = session.groups.find((g) => g.id === groupId)
-    if (!group) return
-    group.tabs = group.tabs.filter((t) => t.id !== tabId)
-    session.groups = session.groups.filter(
-      (g) => g.tabs.length > 0 || isReadLaterName(g.name) || isUngroupedName(g.name),
-    )
-    ensureFixedGroups(session, { newId })
-    await setData(data)
+    const deleted = await mutateData((data) => {
+      const session = data.sessions.find((s: Session) => s.id === sessionId)
+      if (!session) return false
+      const group = session.groups.find((g) => g.id === groupId)
+      if (!group) return false
+      const before = group.tabs.length
+      group.tabs = group.tabs.filter((t) => t.id !== tabId)
+      session.groups = session.groups.filter(
+        (g) => g.tabs.length > 0 || isReadLaterName(g.name) || isUngroupedName(g.name),
+      )
+      ensureFixedGroups(session, { newId })
+      return group.tabs.length < before
+    })
+    if (!deleted) return
     await reload()
     toast('已删除标签')
   }
@@ -900,6 +921,7 @@ function ManagementApp() {
   async function renameSession(sessionId: string) {
     const data = await getData()
     const session = data.sessions.find((s: Session) => s.id === sessionId)
+    if (!session) return
     const name = prompt('会话名称', session.name)
     if (name == null || !name.trim()) return
     await updateSession(sessionId, { name: name.trim() })
@@ -982,10 +1004,7 @@ function ManagementApp() {
           ? {
               ...prev,
               busy: false,
-              status:
-                r.reason === 'too_few' ? '可整理的标签太少'
-                : r.reason === 'no_groups' ? '没有可成组的建议'
-                : '无法整理',
+              status: organizeFailText(r.reason, r.error),
               preview: null,
               plan: null,
               windowId: null,
@@ -1001,7 +1020,7 @@ function ManagementApp() {
             busy: false,
             status: r.error
               ? `来源：${sourceLabel(r.source)} · ${String(r.error).slice(0, 40)}`
-              : `来源：${sourceLabel(r.source)} · 跨站主题优先，其余同站并入已有组`,
+              : `来源：${sourceLabel(r.source)} · 按分类模型成组，同名并入已有标签组`,
             preview: r.preview,
             plan: r.plan,
             windowId: r.windowId,
@@ -1025,11 +1044,10 @@ function ManagementApp() {
 
   async function onImport(file: File) {
     try {
+      if (file.size > 10 * 1024 * 1024) throw new TypeError('导入文件过大')
       const text = await file.text()
       const imported = JSON.parse(text)
-      const data = await getData()
-      mergeImport(data, imported)
-      await setData(data)
+      await mutateData((data) => mergeImport(data, imported))
       toast(`已导入 ${imported.sessions?.length || 0} 个会话`)
       await reload()
     } catch {
@@ -1086,41 +1104,6 @@ function ManagementApp() {
                 : `${sessions.length} 个会话`}
             </span>
           )}
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <GlassButton
-              disabled={stashBusy}
-              title="收纳当前窗口里除当前页以外的标签"
-              onClick={() => void onStash(true)}
-            >
-              {stashBusy ? '收纳中…' : '收纳其他标签'}
-            </GlassButton>
-            <button
-              type="button"
-              disabled={stashBusy}
-              className="cursor-pointer text-xs text-muted-foreground transition-colors hover:text-foreground hover:underline disabled:opacity-35"
-              onClick={() => void onStash(false)}
-            >
-              连当前页
-            </button>
-            <GlassButton
-              variant="outline"
-              disabled={stashBusy}
-              title="预览后应用；已成组标签也可以重分"
-              onClick={() => void openLive()}
-            >
-              整理当前窗口
-            </GlassButton>
-            <GlassButton
-              variant="secondary"
-              disabled={stashBusy}
-              title="把其他窗口的标签并进本窗再重建标签组"
-              onClick={() => void openMerge()}
-            >
-              合并并整理全部窗口
-            </GlassButton>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
           {sessions.length > 0 && (
             <>
               <label className="sr-only" htmlFor="session-search">
@@ -1133,7 +1116,7 @@ function ManagementApp() {
                 value={query}
                 placeholder="搜索标题或网址…（/）"
                 autoComplete="off"
-                className="min-w-0 flex-1 rounded-lg border border-transparent bg-black/[0.04] px-3 py-1.5 text-sm text-foreground outline-none transition-[background,box-shadow,border-color] placeholder:text-muted-foreground/65 hover:bg-black/[0.055] focus-visible:border-ring/30 focus-visible:bg-white/90 focus-visible:ring-3 focus-visible:ring-ring/25"
+                className="min-w-[160px] flex-1 rounded-lg border border-transparent bg-black/[0.04] px-3 py-1.5 text-sm text-foreground outline-none transition-[background,box-shadow,border-color] placeholder:text-muted-foreground/65 hover:bg-black/[0.055] focus-visible:border-ring/30 focus-visible:bg-white/90 focus-visible:ring-3 focus-visible:ring-ring/25"
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Escape' && query) {
@@ -1163,43 +1146,126 @@ function ManagementApp() {
               )}
             </>
           )}
-          <Button
-            variant={showClassify ? 'secondary' : 'ghost'}
-            size="sm"
-            aria-expanded={showClassify}
-            onClick={() => setShowClassify((v) => !v)}
-          >
-            分类设置
-          </Button>
-          <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+          <div className="ml-auto flex items-center gap-2">
+            <GlassButton
+              disabled={stashBusy}
+              title="收纳当前窗口里除当前页以外的标签"
+              onClick={() => void onStash(true)}
+            >
+              {stashBusy ? '收纳中…' : '收纳'}
+            </GlassButton>
+            <button
+              type="button"
+              disabled={stashBusy}
+              className="cursor-pointer text-xs text-muted-foreground transition-colors hover:text-foreground hover:underline disabled:opacity-35"
+              onClick={() => void onStash(false)}
+            >
+              连当前页一起收纳
+            </button>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          <div className="flex flex-wrap items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={stashBusy}
+              title="预览后应用；已成组标签也可以重分"
+              onClick={() => void openLive()}
+            >
+              整理当前窗口
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={stashBusy}
+              title="把其他窗口的标签并进本窗再整理"
+              onClick={() => void openMerge()}
+            >
+              合并全部窗口
+            </Button>
+            <span className="mx-1 hidden h-3 w-px bg-border/80 sm:block" aria-hidden />
+            <Button
+              variant="ghost"
+              size="sm"
+              title="打开的标签（全部窗口）与已收纳会话"
+              onClick={() => void openDedup()}
+            >
+              合并重复网页
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => void openUsage()}>
+              闲置休眠
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-0.5">
+            <Button
+              variant={showClassify ? 'secondary' : 'ghost'}
+              size="sm"
+              aria-expanded={showClassify}
+              title={classifyModeLabel(settings.classifyMode)}
+              onClick={() => {
+                setShowClassify((v) => !v)
+                setShowModels(false)
+              }}
+            >
+              分类设置
+              <span className="ml-1.5 font-normal text-muted-foreground">
+                {classifyModeLabel(settings.classifyMode)}
+              </span>
+            </Button>
+            <Button
+              variant={showModels ? 'secondary' : 'ghost'}
+              size="sm"
+              aria-expanded={showModels}
+              title="下载、删除浏览器内小模型"
+              onClick={() => {
+                setShowModels((v) => !v)
+                setShowClassify(false)
+              }}
+            >
+              模型
+            </Button>
+            <label className="inline-flex cursor-pointer items-center gap-1.5 px-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={settings.stashReview !== false}
+                onChange={(e) => { void persistSettings({ stashReview: e.target.checked }) }}
+              />
+              收纳后询问
+            </label>
+            <Button variant="ghost" size="sm" onClick={() => void onExport()}>导出</Button>
+            <Button variant="ghost" size="sm" onClick={() => importRef.current?.click()}>导入</Button>
             <input
-              type="checkbox"
-              checked={settings.stashReview !== false}
-              onChange={(e) => { void persistSettings({ stashReview: e.target.checked }) }}
+              ref={importRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) void onImport(file)
+                e.target.value = ''
+              }}
             />
-            收纳后询问
-          </label>
-          <Button variant="ghost" size="sm" title="打开的标签（全部窗口）与已收纳会话" onClick={() => void openDedup()}>合并重复</Button>
-          <Button variant="ghost" size="sm" onClick={() => void openUsage()}>闲置休眠</Button>
-          <Button variant="ghost" size="sm" onClick={() => void onExport()}>导出</Button>
-          <Button variant="ghost" size="sm" onClick={() => importRef.current?.click()}>导入</Button>
-          <input
-            ref={importRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0]
-              if (file) void onImport(file)
-              e.target.value = ''
-            }}
-          />
+          </div>
         </div>
         {showClassify && (
           <div className="border-t border-border/50 pt-2">
             <ClassifyPicker
               value={settings}
               onChange={(patch) => { void persistSettings(patch) }}
+              onOpenLibrary={() => {
+                setShowClassify(false)
+                setShowModels(true)
+              }}
+            />
+          </div>
+        )}
+        {showModels && (
+          <div className="border-t border-border/50 pt-2">
+            <ModelLibrary
+              currentModelId={settings.browserModelId}
+              preferWebGPU={settings.preferWebGPU !== false}
+              onUse={(id) => { void persistSettings({ browserModelId: id }) }}
             />
           </div>
         )}
@@ -1210,11 +1276,11 @@ function ManagementApp() {
           <div className="mt-6 flex flex-col items-center gap-4 rounded-2xl border border-dashed border-border/90 bg-white/40 px-6 py-20 text-center backdrop-blur-[8px]">
             <div className="flex flex-col gap-1.5">
               <p className="m-0 text-[15px] font-medium tracking-tight text-foreground/90">还没有会话</p>
-              <p className="m-0 text-sm text-muted-foreground">收纳其他标签，当前页会留下</p>
+              <p className="m-0 text-sm text-muted-foreground">收纳当前窗口，当前页会留下</p>
             </div>
             <div className="flex flex-col items-center gap-2">
               <GlassButton disabled={stashBusy} onClick={() => void onStash(true)}>
-                {stashBusy ? '收纳中…' : '收纳其他标签'}
+                {stashBusy ? '收纳中…' : '收纳'}
               </GlassButton>
               <button
                 type="button"
@@ -1358,6 +1424,7 @@ function ManagementApp() {
                 const next = mergeClassifySettings(modal.picker, patch)
                 void runSuggest(modal.sessionId, next, modal.proposedName !== undefined)
               }}
+              onOpenLibrary={openModelLibrary}
             />
             <p className={cn('mt-2 rounded-[10px] bg-black/[0.04] px-3 py-2.5 text-[13px]', modal.busy && 'opacity-80')}>
               {modal.status}
@@ -1413,7 +1480,7 @@ function ManagementApp() {
           <>
             <h2 className="m-0 text-[17px] font-semibold tracking-tight">整理当前窗口</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              跨站同一主题会先成组。已在标签组里的也可以抽走重分。X 能确定作者或主题时用 X|alice、X|React。其余同站并入已有组（单条也并入），同站多组合并；忙的 GitHub 会按所有者拆开。应用后折叠非当前组。
+              用当前分类模型给本窗标签分组。已在标签组里的也可以抽走重分。模型组名与已有标签组相同时并入，否则新建。失败不会改回按站点。应用后折叠非当前组。
             </p>
             <ClassifyPicker
               className="mt-2.5"
@@ -1422,6 +1489,7 @@ function ManagementApp() {
                 const next = mergeClassifySettings(modal.picker, patch)
                 void runLivePreview(next)
               }}
+              onOpenLibrary={openModelLibrary}
             />
             <p className={cn('mt-2 rounded-[10px] bg-black/[0.04] px-3 py-2.5 text-[13px]', modal.busy && 'opacity-80')}>
               {modal.status}
@@ -1492,6 +1560,7 @@ function ManagementApp() {
                     : prev,
                 )
               }
+              onOpenLibrary={openModelLibrary}
             />
             {modal.progress && (
               <p className="mt-2 rounded-[10px] bg-black/[0.04] px-3 py-2.5 text-[13px]">{modal.progress}</p>
@@ -1511,15 +1580,11 @@ function ManagementApp() {
                           setModal((prev) => (prev.kind === 'merge' ? { ...prev, progress: msg } : prev)),
                       })
                       if (!r.ok) {
-                        if (r.reason === 'no_groups') toast('没有可成组的建议')
-                        else if (r.reason === 'too_few') toast('可整理标签太少')
-                        else if (r.reason === 'partial') {
+                        if (r.reason === 'partial') {
                           toast(
                             `已拆组但未完成：成功 ${r.apply?.created || 0} 组，失败 ${r.apply?.failed?.length || 0} 组`,
                           )
-                        } else if (r.reason === 'all_failed' || r.reason === 'apply_failed') {
-                          toast('分组失败，旧组已尽量保留')
-                        } else toast('整理失败')
+                        } else toast(organizeFailText(r.reason, r.error))
                         setModal({ kind: 'none' })
                         return
                       }

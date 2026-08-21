@@ -47,8 +47,8 @@ export function HeightCollapse({ open, children }: { open: boolean; children: Re
           `opacity 180ms ease-out`
         node.style.height = `${h}px`
         node.style.opacity = '1'
-        const done = (e: TransitionEvent) => {
-          if (e.propertyName !== 'height' || e.target !== node) return
+        const done = (e?: TransitionEvent) => {
+          if (!e || e.propertyName !== 'height' || e.target !== node) return
           node.removeEventListener('transitionend', done)
           if (onEndRef.current === done) onEndRef.current = null
           node.style.transition = ''

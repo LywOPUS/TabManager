@@ -38,11 +38,54 @@ export function IconInbox({ className }: { className?: string }) {
   )
 }
 
+export function IconNewWindow({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
+      <rect x="1.75" y="4.5" width="8" height="7.5" rx="1.1" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M8.5 3.5H13.5V8.5M13.5 3.5 8 9"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+export function IconTopic({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
+      <path
+        d="M3.5 5.5h9M3.5 10.5h9M6.2 3 4.8 13M11.2 3 9.8 13"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
 export function IconTarget({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
       <circle cx="8" cy="8" r="5.25" stroke="currentColor" strokeWidth="1.5" />
       <circle cx="8" cy="8" r="1.75" fill="currentColor" />
+    </svg>
+  )
+}
+
+export function IconSelectTabs({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
+      <rect x="2" y="3.25" width="8.25" height="9.5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M4.15 8.05 6 9.8l3.15-3.55"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   )
 }
@@ -149,6 +192,44 @@ export function IconBack({ className }: { className?: string }) {
     <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
       <path d="M10 3.5 5.5 8 10 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  )
+}
+
+export function PanelHeader({ title, onBack }: { title: string; onBack: () => void }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <button
+        type="button"
+        aria-label="返回"
+        className="grid size-7 shrink-0 place-items-center rounded-lg text-[#8b8b8e] transition-[background-color,color,transform] duration-100 ease-out hover:bg-black/5 hover:text-[#0a0a0a] active:scale-95"
+        onClick={onBack}
+      >
+        <IconBack />
+      </button>
+      <h1 className="m-0 text-[15px] font-semibold tracking-tight text-[#0a0a0a]">{title}</h1>
+    </div>
+  )
+}
+
+export function ActionMore({
+  open,
+  onClick,
+  children,
+}: {
+  open: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      className="flex w-full items-center justify-center gap-1 px-2.5 py-[7px] text-[11px] text-[#8b8b8e] transition-colors hover:bg-black/[0.03] hover:text-[#0a0a0a]"
+      onClick={onClick}
+    >
+      {children}
+      <IconChevronRight className={cn('size-3 transition-transform duration-150', open ? '-rotate-90' : 'rotate-90')} />
+    </button>
   )
 }
 

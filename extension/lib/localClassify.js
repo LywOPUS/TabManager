@@ -1,18 +1,62 @@
 import { registrableDomain } from './groupHeuristics.js';
-import { finalizePreview, suggestGroups } from './groupLabels.js';
 import { classifyWithBrowserEmbed } from './browserEmbedClassify.js';
 import { classifyWithGeminiNano } from './geminiClassify.js';
-import { ensureRemoteHostPermission } from './settings.js';
+import { refineGroupsOpenAI } from './groupRefine.js';
+import { finalizeGroupName, isJunkGroupName } from './groupLabels.js';
+import { AGENT_CLASSIFY_MODES, ensureRemoteHostPermission } from './settings.js';
+
+/** 只收模型给出的组：合并同名、丢掉不足 2 条的，不把未分组再按站点收成组 */
+function sealPreview(preview, items = []) {
+  const used = new Set();
+  const byName = new Map();
+  for (const g of preview?.groups || []) {
+    const rawName = String(g.name || '分组').trim().slice(0, 40) || '分组';
+    const tabs = [];
+    for (const t of g.tabs || []) {
+      if (!t || used.has(t.id)) continue;
+      used.add(t.id);
+      tabs.push(t);
+    }
+    if (tabs.length < 2) {
+      for (const t of tabs) used.delete(t.id);
+      continue;
+    }
+    const name = isJunkGroupName(rawName) ? finalizeGroupName(rawName, tabs) : rawName;
+    const key = name.toLowerCase();
+    const cur = byName.get(key);
+    if (cur) {
+      cur.tabs.push(...tabs);
+      cur.tabIds = cur.tabs.map((t) => t.id);
+      if (name.length < cur.name.length) {
+        cur.name = name;
+        cur.key = name;
+      }
+    } else {
+      byName.set(key, { key: name, name, tabs, tabIds: tabs.map((t) => t.id) });
+    }
+  }
+  const groups = [...byName.values()].filter((g) => g.tabs.length >= 2);
+  groups.sort((a, b) => b.tabs.length - a.tabs.length || a.name.localeCompare(b.name, 'zh'));
+  const seen = new Set();
+  const ungrouped = [];
+  for (const t of items.length ? items : preview?.ungrouped || []) {
+    if (!t || used.has(t.id) || seen.has(t.id)) continue;
+    seen.add(t.id);
+    ungrouped.push(t);
+  }
+  return { groups, ungrouped };
+}
 
 /**
- * classifyMode: site | browser | gemini | ollama | openai
+ * classifyMode: browser | gemini | ollama | openai（site 已停用，失败也不回退站点）
  * groupQuality: fast | enhanced
- *   fast     = 单次分类 + 分批近义名合并（无第二轮模型、无后处理）
- *   enhanced = 主题提示加强 + 域名回填后处理 +（OpenAI）近义组模型合并
+ *   fast     = 单次分类 + 分批近义名合并
+ *   enhanced = 主题提示加强 +（OpenAI）近义组模型合并
+ * 浏览器模式若已填远程 Key：聚类后只把每组代表标题发给远程起名/剔脏。
  */
 export async function suggestGroupsSmart(items, options = {}) {
   const {
-    classifyMode = 'site',
+    classifyMode = 'browser',
     useLocalModel = false, // 兼容旧调用
     groupQuality = 'fast',
     browserModelId,
@@ -30,27 +74,37 @@ export async function suggestGroupsSmart(items, options = {}) {
   if (!options.classifyMode && useLocalModel) mode = 'ollama';
 
   const finish = (preview, source, extra = {}) => ({
-    preview: finalizePreview(preview),
+    preview: sealPreview(preview, items),
     source,
     ...extra,
   });
+  const fail = (error, source = 'error') => {
+    const msg = String(error || '分类失败');
+    onStatus?.(msg);
+    return {
+      preview: { groups: [], ungrouped: items || [] },
+      source,
+      error: msg,
+    };
+  };
 
-  if (!items.length || mode === 'site') {
-    return finish(suggestGroups(items), 'heuristic');
+  if (!items.length) {
+    return finish({ groups: [], ungrouped: [] }, 'empty');
+  }
+  if (!AGENT_CLASSIFY_MODES.includes(mode)) {
+    return fail('已停用按站点分组，请选择分类模型');
   }
 
   if (mode === 'gemini') {
     try {
       const preview = await classifyWithGeminiNano(items, { onStatus });
       if (!preview.groups.length) {
-        onStatus?.('Gemini 组不足，回退站点分组');
-        return finish(suggestGroups(items), 'heuristic-fallback');
+        return fail('Gemini 没有给出可成组的主题');
       }
-      return finish(enhanced ? postProcessPreview(items, preview) : preview, 'gemini-nano');
+      return finish(preview, 'gemini-nano');
     } catch (e) {
-      console.warn('gemini nano fallback', e);
-      onStatus?.(`Gemini Nano 不可用（${e.message || e}），已回退站点`);
-      return finish(suggestGroups(items), 'heuristic-fallback', { error: String(e?.message || e) });
+      console.warn('gemini nano failed', e);
+      return fail(`Gemini Nano 不可用（${e.message || e}）`);
     }
   }
 
@@ -62,14 +116,27 @@ export async function suggestGroupsSmart(items, options = {}) {
         preferWebGPU,
       });
       if (!preview.groups.length) {
-        onStatus?.('语义组不足，回退站点分组');
-        return finish(suggestGroups(items), 'heuristic-fallback');
+        return fail('浏览器模型没有给出可成组的主题');
       }
-      return finish(enhanced ? postProcessPreview(items, preview) : preview, 'browser-embed');
+      const key = String(apiKey || '').trim();
+      if (!key) return finish(preview, 'browser-embed');
+      try {
+        const refined = await refineGroupsOpenAI(preview, {
+          baseUrl: remoteBaseUrl || baseUrl,
+          apiKey: key,
+          model: remoteModel || model,
+          onStatus,
+        });
+        return finish(refined, 'browser-embed-refine');
+      } catch (e) {
+        console.warn('group refine skipped', e);
+        onStatus?.('远程起名未成功，沿用本地聚类');
+        return finish(preview, 'browser-embed');
+      }
     } catch (e) {
-      console.warn('browser embed fallback', e);
-      onStatus?.('浏览器模型不可用，已回退站点分组');
-      return finish(suggestGroups(items), 'heuristic-fallback', { error: String(e?.message || e) });
+      console.warn('browser embed failed', e);
+      const raw = String(e?.message || e);
+      return fail(raw.includes('模型') ? raw : `浏览器模型不可用（${raw}）`);
     }
   }
 
@@ -85,11 +152,13 @@ export async function suggestGroupsSmart(items, options = {}) {
       if (!preview.groups.length && !preview.ungrouped.length) {
         throw new Error('empty model result');
       }
-      return finish(enhanced ? postProcessPreview(items, preview) : preview, 'local-model');
+      if (!preview.groups.length) {
+        return fail('Ollama 没有给出可成组的主题');
+      }
+      return finish(preview, 'local-model');
     } catch (e) {
-      console.warn('ollama fallback', e);
-      onStatus?.('Ollama 不可用，已回退站点分组');
-      return finish(suggestGroups(items), 'heuristic-fallback', { error: String(e?.message || e) });
+      console.warn('ollama failed', e);
+      return fail(`Ollama 不可用（${e.message || e}）`);
     }
   }
 
@@ -99,9 +168,7 @@ export async function suggestGroupsSmart(items, options = {}) {
       onStatus?.('检查 OpenAI 主机权限…');
       const hostOk = await ensureRemoteHostPermission(endpoint);
       if (!hostOk) {
-        const err = '未授予 OpenAI 兼容接口主机权限';
-        onStatus?.(err);
-        return finish(suggestGroups(items), 'heuristic-fallback', { error: err });
+        return fail('未授予 OpenAI 兼容接口主机权限');
       }
       onStatus?.(enhanced ? '增强模式：请求 OpenAI 兼容接口…' : '快速模式：请求 OpenAI 兼容接口…');
       const preview = await classifyWithOpenAI(items, {
@@ -114,15 +181,17 @@ export async function suggestGroupsSmart(items, options = {}) {
       if (!preview.groups.length && !preview.ungrouped.length) {
         throw new Error('empty model result');
       }
-      return finish(enhanced ? postProcessPreview(items, preview) : preview, 'openai');
+      if (!preview.groups.length) {
+        return fail('OpenAI 兼容接口没有给出可成组的主题');
+      }
+      return finish(preview, 'openai');
     } catch (e) {
-      console.warn('openai fallback', e);
-      onStatus?.(`OpenAI 兼容接口不可用（${e.message || e}），已回退站点`);
-      return finish(suggestGroups(items), 'heuristic-fallback', { error: String(e?.message || e) });
+      console.warn('openai failed', e);
+      return fail(`OpenAI 兼容接口不可用（${e.message || e}）`);
     }
   }
 
-  return finish(suggestGroups(items), 'heuristic');
+  return fail('请选择分类模型');
 }
 
 // 分批：输出 token 有限，全量上百个 id 易截断 JSON。
@@ -532,5 +601,5 @@ export const __test__ = {
   mergeBatchedPreviews,
   postProcessPreview,
   targetGroupHint,
-  finalizePreview,
+  sealPreview,
 };
