@@ -15,6 +15,18 @@ export default defineConfig({
         rmSync(path.resolve(__dirname, '../extension/mgmt'), { recursive: true, force: true })
       },
     },
+    {
+      name: 'extension-html',
+      apply: 'build',
+      transformIndexHtml: {
+        order: 'post',
+        handler(html) {
+          return html
+            .replace(/\s+crossorigin(?:=(?:"[^"]*"|'[^']*'))?/g, '')
+            .replace(/\n?\s*<link\s+rel="modulepreload"[^>]*>/g, '')
+        },
+      },
+    },
     react(),
     tailwindcss(),
   ],
@@ -25,13 +37,14 @@ export default defineConfig({
     },
   },
   build: {
+    modulePreload: false,
     outDir: path.resolve(__dirname, '../extension'),
     emptyOutDir: false,
     rollupOptions: {
       input: {
         management: path.resolve(__dirname, 'management.html'),
         popup: path.resolve(__dirname, 'popup.html'),
-        'glass-compare': path.resolve(__dirname, 'glass-compare.html'),
+        sidepanel: path.resolve(__dirname, 'sidepanel.html'),
       },
       output: {
         entryFileNames: 'mgmt/[name].js',

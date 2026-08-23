@@ -151,15 +151,6 @@ body.popup-body #root {
     linear-gradient(165deg, #fbfbfb 0%, #f8f8f8 48%, #f4f4f4 100%);
 }
 
-/* 页内 iframe 宿主（可选）：仍可裁圆角 */
-body.popup-body.popup-embedded {
-  width: fit-content;
-  background: transparent !important;
-}
-body.popup-body.popup-embedded .popup-shell {
-  border-radius: 16px;
-}
-
 body:not(.popup-body) {
   background: var(--background);
 }

@@ -13,6 +13,7 @@ import {
   type ClassifySettings,
 } from '@/components/ClassifyPicker'
 import { ModelLibrary } from '@/components/ModelLibrary'
+import { Favicon, domainOf } from '@/components/Favicon'
 import { timeAgo } from '@/lib/timeAgo'
 import { ToastProvider, useToast } from '@/hooks/useToast'
 import { JetBrainsAmbient } from '@/components/JetBrainsAmbient'
@@ -84,6 +85,15 @@ type UsageRow = {
   suggestDiscard: boolean
 }
 
+/** 跨会话汇总的稍后阅读条目（附出来源会话，便于跳回） */
+type ReadLaterItem = {
+  sessionId: string
+  sessionName: string
+  groupId: string
+  sessionAt: number
+  tab: Session['groups'][number]['tabs'][number]
+}
+
 type ModalState =
   | { kind: 'none' }
   | { kind: 'busy'; title: string; message: string; progress: string }
@@ -143,14 +153,6 @@ type ModalState =
       selected: Set<number>
     }
 
-function domainOf(url: string) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '')
-  } catch {
-    return ''
-  }
-}
-
 function HighlightText({ text, query }: { text: string; query: string }) {
   const hit = highlightMatch(text, query)
   if (!hit) return text
@@ -162,51 +164,6 @@ function HighlightText({ text, query }: { text: string; query: string }) {
     </>
   )
 }
-
-/** _favicon API → 收纳时存的 favIconUrl → 域名首字母 */
-const Favicon = memo(function Favicon({
-  url,
-  favIconUrl,
-  className,
-}: {
-  url: string
-  favIconUrl?: string
-  className?: string
-}) {
-  const [stage, setStage] = useState(0)
-  const host = useMemo(() => domainOf(url), [url])
-  const srcs = useMemo(() => {
-    const extId = globalThis.chrome?.runtime?.id
-    return [
-      extId ? `chrome-extension://${extId}/_favicon/?pageUrl=${encodeURIComponent(url)}&size=32` : null,
-      favIconUrl || null,
-    ].filter(Boolean) as string[]
-  }, [url, favIconUrl])
-
-  if (stage >= srcs.length) {
-    return (
-      <span
-        aria-hidden
-        className={cn(
-          'flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-black/8 text-[9px] font-semibold uppercase text-muted-foreground',
-          className,
-        )}
-      >
-        {host.charAt(0) || '·'}
-      </span>
-    )
-  }
-  return (
-    <img
-      src={srcs[stage]}
-      alt=""
-      loading="lazy"
-      decoding="async"
-      onError={() => setStage((s) => s + 1)}
-      className={cn('size-4 shrink-0 rounded-[4px]', className)}
-    />
-  )
-})
 
 function TextAction({
   danger,
@@ -442,6 +399,7 @@ function ManagementApp() {
   const { toast } = useToast()
   const [sessions, setSessions] = useState<Session[]>([])
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [view, setView] = useState<'sessions' | 'readLater'>('sessions')
   const [settings, setSettingsState] = useState<ClassifySettings | null>(null)
   const [modal, setModal] = useState<ModalState>({ kind: 'none' })
   const [query, setQuery] = useState('')
@@ -486,6 +444,32 @@ function ManagementApp() {
     return sessions
   }, [searching, sessionOnly, sessions])
 
+  /** 全部会话的「稍后阅读」汇总；会话创建时间倒序近似加入顺序 */
+  const readLaterItems = useMemo<ReadLaterItem[]>(() => {
+    const items: ReadLaterItem[] = []
+    for (const s of sessions) {
+      for (const g of s.groups) {
+        if (!isReadLaterName(g.name)) continue
+        for (const tab of g.tabs) {
+          items.push({ sessionId: s.id, sessionName: s.name, groupId: g.id, sessionAt: s.createdAt, tab })
+        }
+      }
+    }
+    items.sort((a, b) => b.sessionAt - a.sessionAt)
+    return items
+  }, [sessions])
+
+  const filteredReadLater = useMemo(() => {
+    const q = deferredQuery.trim().toLowerCase()
+    if (!q) return readLaterItems
+    return readLaterItems.filter(
+      ({ tab, sessionName }) =>
+        tab.title.toLowerCase().includes(q) ||
+        tab.url.toLowerCase().includes(q) ||
+        sessionName.toLowerCase().includes(q),
+    )
+  }, [readLaterItems, deferredQuery])
+
   const reload = useCallback(async () => {
     const data = await getData()
     let dirty = false
@@ -511,12 +495,7 @@ function ManagementApp() {
     setExpanded((prev) => (prev === id ? null : id))
   }, [])
 
-  async function persistSettings(
-    patch: Partial<ClassifySettings> & {
-      localModel?: Partial<ClassifySettings['localModel']>
-      remoteModel?: Partial<ClassifySettings['remoteModel']>
-    },
-  ) {
+  async function persistSettings(patch: Partial<ClassifySettings>) {
     const next = await setSettings(patch)
     setSettingsState(next as ClassifySettings)
     return next as ClassifySettings
@@ -576,15 +555,8 @@ function ManagementApp() {
       } catch {
         setSettingsState({
           classifyMode: 'browser',
-          groupQuality: 'fast',
           browserModelId: 'onnx-community/embeddinggemma-300m-ONNX',
           preferWebGPU: true,
-          localModel: { model: 'qwen2.5:0.5b' },
-          remoteModel: {
-            baseUrl: 'https://api.openai.com/v1',
-            apiKey: '',
-            model: 'gpt-4o-mini',
-          },
         })
       }
     })()
@@ -1097,6 +1069,27 @@ function ManagementApp() {
       <header className="sticky top-0 z-20 flex flex-col gap-2 border-b border-border/80 bg-white/60 px-4 py-2.5 backdrop-blur-[24px] backdrop-saturate-150">
         <div className="flex flex-wrap items-center gap-2.5">
           <h1 className="m-0 text-lg font-semibold tracking-tight">标签管理</h1>
+          <div className="flex shrink-0 items-center rounded-lg bg-black/[0.045] p-0.5" role="tablist" aria-label="视图切换">
+            {(['sessions', 'readLater'] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                role="tab"
+                aria-selected={view === v}
+                className={cn(
+                  'cursor-pointer rounded-[7px] px-2.5 py-1 text-xs transition-colors',
+                  view === v
+                    ? 'bg-white font-medium text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+                onClick={() => setView(v)}
+              >
+                {v === 'sessions'
+                  ? '会话'
+                  : `稍后阅读${readLaterItems.length ? ` ${readLaterItems.length}` : ''}`}
+              </button>
+            ))}
+          </div>
           {sessions.length > 0 && (
             <span className="text-xs tabular-nums text-muted-foreground">
               {searching
@@ -1272,7 +1265,7 @@ function ManagementApp() {
       </header>
 
       <main className="relative z-10 mx-auto flex max-w-[880px] flex-col px-4 py-4 pb-16">
-        {!sessions.length && (
+        {view === 'sessions' && !sessions.length && (
           <div className="mt-6 flex flex-col items-center gap-4 rounded-2xl border border-dashed border-border/90 bg-white/40 px-6 py-20 text-center backdrop-blur-[8px]">
             <div className="flex flex-col gap-1.5">
               <p className="m-0 text-[15px] font-medium tracking-tight text-foreground/90">还没有会话</p>
@@ -1294,7 +1287,7 @@ function ManagementApp() {
           </div>
         )}
 
-        {sessions.length > 0 && searching && !tabHits.length && !sessionOnly.length && (
+        {view === 'sessions' && sessions.length > 0 && searching && !tabHits.length && !sessionOnly.length && (
           <div className="mt-2 rounded-xl border border-border/70 bg-white/50 px-4 py-14 text-center" role="status">
             <p className="m-0 text-sm text-muted-foreground">
               没有匹配「{query.trim()}」的标签
@@ -1313,7 +1306,7 @@ function ManagementApp() {
           </div>
         )}
 
-        {searching && groupedHits.length > 0 && (
+        {view === 'sessions' && searching && groupedHits.length > 0 && (
           <div className="overflow-hidden rounded-xl border border-border/90 bg-white/92 shadow-[0_1px_2px_rgba(0,0,0,0.035)]">
             <div className="divide-y divide-border/70">
               {groupedHits.map((block) => (
@@ -1370,7 +1363,7 @@ function ManagementApp() {
           </div>
         )}
 
-        {filteredSessions.length > 0 && (
+        {view === 'sessions' && filteredSessions.length > 0 && (
           <div className={searching && groupedHits.length > 0 ? 'mt-3 overflow-hidden rounded-xl border border-border/90 bg-white/92 shadow-[0_1px_2px_rgba(0,0,0,0.035)]' : 'overflow-hidden rounded-xl border border-border/90 bg-white/92 shadow-[0_1px_2px_rgba(0,0,0,0.035)]'}>
             {searching && groupedHits.length > 0 && sessionOnly.length > 0 && (
               <p className="m-0 border-b border-border/70 px-3.5 py-2 text-[11px] text-muted-foreground">
@@ -1386,6 +1379,77 @@ function ManagementApp() {
                   onToggle={onToggleSession}
                   actionsRef={actionsRef}
                 />
+              ))}
+            </div>
+          </div>
+        )}
+        {view === 'readLater' && !readLaterItems.length && (
+          <div className="mt-6 flex flex-col items-center gap-4 rounded-2xl border border-dashed border-border/90 bg-white/40 px-6 py-20 text-center backdrop-blur-[8px]">
+            <div className="flex flex-col gap-1.5">
+              <p className="m-0 text-[15px] font-medium tracking-tight text-foreground/90">还没有稍后阅读</p>
+              <p className="m-0 text-sm text-muted-foreground">在会话的标签行点「稍后阅读」，就会汇聚到这里</p>
+            </div>
+          </div>
+        )}
+
+        {view === 'readLater' && readLaterItems.length > 0 && !filteredReadLater.length && (
+          <div className="mt-2 rounded-xl border border-border/70 bg-white/50 px-4 py-14 text-center" role="status">
+            <p className="m-0 text-sm text-muted-foreground">没有匹配「{query.trim()}」的稍后阅读</p>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mt-2"
+              onClick={() => {
+                setQuery('')
+                searchRef.current?.focus()
+              }}
+            >
+              清除搜索
+            </Button>
+          </div>
+        )}
+
+        {view === 'readLater' && filteredReadLater.length > 0 && (
+          <div className="overflow-hidden rounded-xl border border-border/90 bg-white/92 shadow-[0_1px_2px_rgba(0,0,0,0.035)]">
+            <div className="divide-y divide-border/70">
+              {filteredReadLater.map(({ sessionId, sessionName, groupId, sessionAt, tab }, i) => (
+                <div
+                  key={tab.id}
+                  className={cn(
+                    'group/row flex items-center gap-2 px-3.5 py-2 transition-colors hover:bg-black/[0.02]',
+                    i < 12 && 'anim-row',
+                  )}
+                  style={i < 12 ? ({ '--row-delay': `${i * 18}ms` } as React.CSSProperties) : undefined}
+                >
+                  <Favicon url={tab.url} favIconUrl={tab.favIconUrl} />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px] leading-[18px] text-foreground/85" title={tab.url}>
+                      <HighlightText text={tab.title} query={deferredQuery} />
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/70">
+                      <span className="shrink-0">{domainOf(tab.url)}</span>
+                      <span aria-hidden>·</span>
+                      <button
+                        type="button"
+                        title="跳转到来源会话"
+                        className="min-w-0 cursor-pointer truncate transition-colors hover:text-foreground hover:underline"
+                        onClick={() => {
+                          setView('sessions')
+                          setExpanded(sessionId)
+                        }}
+                      >
+                        {sessionName}
+                      </button>
+                      <span aria-hidden>·</span>
+                      <span className="shrink-0">{timeAgo(sessionAt)}</span>
+                    </div>
+                  </div>
+                  <span className="flex shrink-0 items-center gap-2.5 opacity-60 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100">
+                    <TextAction className="text-xs" onClick={() => void openOneTab(sessionId, groupId, tab.id)}>打开</TextAction>
+                    <TextAction className="text-xs" onClick={() => void moveTabReadLater(sessionId, tab.id, false)}>移出</TextAction>
+                    <TextAction danger className="text-xs" onClick={() => void deleteOneTab(sessionId, groupId, tab.id)}>删除</TextAction>
+                  </span>
+                </div>
               ))}
             </div>
           </div>

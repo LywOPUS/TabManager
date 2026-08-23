@@ -47,6 +47,10 @@ export {
   isBrowserModelCacheReady,
 } from '@ext/lib/browserModelCache.js'
 export {
+  collectClosableTabs,
+  CLOSE_IDLE_MS,
+} from '@ext/lib/closeSuggest.js'
+export {
   findDuplicates,
   removeDuplicates,
   findOpenTabDuplicates,
@@ -67,15 +71,11 @@ export {
 import {
   getSettings,
   setSettings,
-  ensureRemoteHostPermission,
-  normalizeOpenAIBaseUrl,
   classifyOptsFromSettings,
 } from '@ext/lib/settings.js'
 export {
   getSettings,
   setSettings,
-  ensureRemoteHostPermission,
-  normalizeOpenAIBaseUrl,
   classifyOptsFromSettings,
 }
 export { BROWSER_MODELS } from '@ext/lib/browserModels.js'
@@ -373,19 +373,12 @@ export function mergeOkText(r: {
 }
 
 export function sourceLabel(source: string | undefined) {
-  if (source === 'gemini-nano') return 'Gemini Nano'
   if (source === 'browser-embed') return '浏览器内小模型'
-  if (source === 'browser-embed-refine') return '浏览器内小模型 + 远程起名'
-  if (source === 'local-model') return 'Ollama'
-  if (source === 'openai') return 'OpenAI 兼容'
   if (source === 'error') return '分类失败'
   if (source === 'empty') return '无标签'
   return '分类模型'
 }
 
-export function classifyModeLabel(mode?: string) {
-  if (mode === 'gemini') return 'Gemini Nano'
-  if (mode === 'ollama') return 'Ollama'
-  if (mode === 'openai') return 'OpenAI 兼容'
+export function classifyModeLabel(_mode?: string) {
   return '浏览器内小模型'
 }

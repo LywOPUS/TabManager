@@ -34,18 +34,9 @@ export function processesApiAvailable() {
   return typeof chrome !== 'undefined' && !!chrome.processes?.getProcessInfo;
 }
 
-/** 申请 optional processes；失败返回 false（走纯 idle） */
+/** 稳定版没有 chrome.processes，也不再写进清单（否则扩展页报错）。 */
 export async function ensureProcessesPermission() {
-  if (typeof chrome === 'undefined' || !chrome.permissions?.request) return false;
-  try {
-    if (await chrome.permissions.contains({ permissions: ['processes'] })) {
-      return processesApiAvailable();
-    }
-    const granted = await chrome.permissions.request({ permissions: ['processes'] });
-    return !!granted && processesApiAvailable();
-  } catch {
-    return false;
-  }
+  return processesApiAvailable();
 }
 
 function emptyMemInfo() {

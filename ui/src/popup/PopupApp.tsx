@@ -16,6 +16,8 @@ import {
   classifyModeLabel,
   classifyOptsFromSettings,
   closeOpenTabDuplicates,
+  closeTabsByIds,
+  collectClosableTabs,
   ensureFixedGroups,
   findOpenTabDuplicates,
   getData,
@@ -54,6 +56,7 @@ import {
   IconTarget,
   IconTopic,
   IconMerge,
+  IconCloseTabs,
   IconUngroup,
   IconWindows,
   PanelHeader,
@@ -66,6 +69,13 @@ type OpenDupe = {
   key: string
   keep: { title: string; active?: boolean }
   items: Array<{ title: string }>
+}
+
+type CloseRow = {
+  tabId: number
+  title: string
+  url: string
+  reasons: string[]
 }
 
 type Panel =
@@ -81,6 +91,7 @@ type Panel =
       preview: { groups: Array<{ name: string; tabs: Array<{ title: string }>; tabIds: string[] }> }
     }
   | { kind: 'dedup'; groups: OpenDupe[]; removing: boolean }
+  | { kind: 'close'; rows: CloseRow[]; kept: number; source: string; checked: Set<number>; closing: boolean }
   | { kind: 'topic'; query: string }
   | { kind: 'confirm'; action: 'related' | 'merge' | 'ungroup'; title: string; detail: string }
 
@@ -377,6 +388,78 @@ export function PopupApp() {
     }
   }
 
+  /** 建议关闭：优先侧栏详细视图；sidePanel 不可用时回退弹窗内面板 */
+  async function openCloseSuggest() {
+    try {
+      const win = await chrome.windows.getCurrent()
+      if (typeof win.id !== 'number') throw new Error('no window id')
+      await chrome.sidePanel.open({ windowId: win.id })
+      return
+    } catch {
+      /* sidePanel 不可用，走弹窗内面板 */
+    }
+    setBusy(true)
+    setMsg('分析可关闭的标签…')
+    try {
+      const { rows, actionableCount } = await collectClosableTabs()
+      if (!actionableCount) {
+        setMsg('没有可考虑关闭的标签')
+        return
+      }
+      const suggested = (rows as CloseRow[]).filter((r) => r.reasons.length > 0)
+      if (!suggested.length) {
+        setMsg('没有建议关闭的标签')
+        return
+      }
+      setMsg('')
+      setPanel({
+        kind: 'close',
+        rows: suggested,
+        kept: actionableCount - suggested.length,
+        source: '启发式',
+        checked: new Set(suggested.map((r) => r.tabId)),
+        closing: false,
+      })
+    } catch {
+      setMsg('分析失败，请重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function toggleCloseCheck(tabId: number) {
+    setPanel((prev) => {
+      if (prev.kind !== 'close') return prev
+      const checked = new Set(prev.checked)
+      if (checked.has(tabId)) checked.delete(tabId)
+      else checked.add(tabId)
+      return { ...prev, checked }
+    })
+  }
+
+  async function applyCloseSuggest() {
+    if (panel.kind !== 'close') return
+    const ids = [...panel.checked]
+    if (!ids.length) {
+      setPanel({ kind: 'idle' })
+      setMsg('没有选中要关闭的标签')
+      return
+    }
+    setPanel({ ...panel, closing: true })
+    setBusy(true)
+    try {
+      const n = await closeTabsByIds(ids)
+      setPanel({ kind: 'idle' })
+      setMsg(n ? `已关闭 ${n} 个标签` : '没有选中要关闭的标签')
+      await loadLiveStats()
+    } catch {
+      setPanel((current) => (current.kind === 'close' ? { ...current, closing: false } : current))
+      setMsg('关闭失败，请重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function applyOpenDedup() {
     if (panel.kind !== 'dedup') return
     setPanel({ ...panel, removing: true })
@@ -395,7 +478,7 @@ export function PopupApp() {
     }
   }
 
-  function onPickerChange(patch: Partial<ClassifySettings> & { localModel?: { model: string } }) {
+  function onPickerChange(patch: Partial<ClassifySettings>) {
     if (panel.kind !== 'stash' && panel.kind !== 'stash-busy') return
     void runStashReview(panel.sessionId, mergeClassifySettings(panel.picker, patch))
   }
@@ -563,6 +646,61 @@ export function PopupApp() {
             </button>
           </div>
         </>
+      ) : panel.kind === 'close' ? (
+        <>
+          <PanelHeader title="建议关闭" onBack={() => setPanel({ kind: 'idle' })} />
+          <p className="m-0 px-0.5 text-[11.5px] leading-snug text-[#8b8b8e]">
+            来源：{panel.source}。钉住 / 有声 / 当前页不参与{panel.kept > 0 ? `，其余 ${panel.kept} 个保留` : ''}。
+          </p>
+          <div className="flex max-h-[240px] flex-col divide-y divide-black/[0.06] overflow-auto rounded-[11px] border border-black/[0.07] bg-white/80 px-2.5 shadow-[0_1px_0_rgba(255,255,255,0.7)_inset]">
+            {panel.rows.map((r, i) => {
+              const on = panel.checked.has(r.tabId)
+              const why = r.reasons.join(' · ')
+              return (
+                <label
+                  key={r.tabId}
+                  className="anim-row flex cursor-pointer items-start gap-2 py-[7px]"
+                  style={{ '--row-delay': `${Math.min(i, 12) * 18}ms` } as React.CSSProperties}
+                >
+                  <input
+                    type="checkbox"
+                    className="mt-[3px] size-3.5 shrink-0 cursor-pointer accent-[#0a0a0a]"
+                    checked={on}
+                    onChange={() => toggleCloseCheck(r.tabId)}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className={`block truncate text-[13px] font-medium tracking-tight transition-colors ${
+                        on ? 'text-[#0a0a0a]' : 'text-[#a1a1a4]'
+                      }`}
+                      title={r.url}
+                    >
+                      {r.title}
+                    </span>
+                    <span className="mt-0.5 block truncate text-[11px] text-[#8b8b8e]">{why}</span>
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+          <div className="mt-0.5 flex items-center justify-end gap-2 px-0.5">
+            <button
+              type="button"
+              className="cursor-pointer rounded-lg px-2.5 py-1.5 text-xs text-[#8b8b8e] transition-[background-color,color,transform] duration-100 ease-out hover:bg-black/5 hover:text-[#0a0a0a] active:scale-[0.98]"
+              onClick={() => setPanel({ kind: 'idle' })}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              disabled={busy || panel.closing || !panel.checked.size}
+              className="cursor-pointer rounded-lg bg-[#0a0a0a] px-3 py-1.5 text-xs font-medium text-white transition-[transform,opacity] duration-100 ease-out enabled:active:scale-[0.98] disabled:opacity-35"
+              onClick={() => void applyCloseSuggest()}
+            >
+              {panel.closing ? '关闭中…' : `关闭 ${panel.checked.size} 个`}
+            </button>
+          </div>
+        </>
       ) : panel.kind === 'confirm' ? (
         <>
           <PanelHeader title={panel.title} onBack={() => setPanel({ kind: 'idle' })} />
@@ -718,6 +856,14 @@ export function PopupApp() {
               onClick={() => void openDedup()}
             >
               合并重复网页
+            </ActionButton>
+            <ActionButton
+              disabled={busy}
+              icon={<IconCloseTabs />}
+              title="按已收纳、重复、闲置与模型判断，选出可以关掉的标签"
+              onClick={() => void openCloseSuggest()}
+            >
+              建议关闭
             </ActionButton>
           </ActionGroup>
 

@@ -7,7 +7,7 @@
     "vendor:transformers": "node scripts/vendor-transformers.mjs",
     "dev:ui": "vite --config ui/vite.config.ts",
     "typecheck": "tsc -p ui/tsconfig.json --noEmit",
-    "check:groups": "node extension/lib/storage.test.mjs && node extension/lib/groupLabels.test.mjs && node extension/lib/liveOrganize.test.mjs && node extension/lib/localClassify.test.mjs && node extension/lib/browserEmbedClassify.test.mjs && node extension/lib/groupRefine.test.mjs && node extension/lib/browserModelCache.test.mjs && node extension/lib/bgJobs.test.mjs && node extension/lib/offscreenRuntime.test.mjs",
+    "check:groups": "node extension/lib/storage.test.mjs && node extension/lib/groupLabels.test.mjs && node extension/lib/liveOrganize.test.mjs && node extension/lib/localClassify.test.mjs && node extension/lib/browserEmbedClassify.test.mjs && node extension/lib/browserModelCache.test.mjs && node extension/lib/bgJobs.test.mjs && node extension/lib/offscreenRuntime.test.mjs && node extension/lib/closeSuggest.test.mjs",
     "test": "npm run check:groups",
     "check": "npm run typecheck && npm test && npm run build:ui",
     "build:ui": "vite build --config ui/vite.config.ts"

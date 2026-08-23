@@ -7,7 +7,7 @@ type PopupShellProps = {
   className?: string
 }
 
-/** 紧凑壳 + 氛围底。default_popup 铺满系统窗；页内嵌入时由 CSS 裁圆角 */
+/** 紧凑壳 + 氛围底。default_popup 铺满系统窗 */
 export function PopupShell({ children, className }: PopupShellProps) {
   return (
     <div
@@ -104,31 +104,6 @@ export function IconLayers({ className }: { className?: string }) {
   )
 }
 
-export function IconRestore({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
-      <path
-        d="M3.5 8a4.5 4.5 0 1 0 1.3-3.15"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-      <path d="M3.5 3v2.5H6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-export function IconGrid({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
-      <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.5" />
-      <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.5" />
-      <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.5" />
-      <rect x="9" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" strokeWidth="1.5" />
-    </svg>
-  )
-}
-
 /** 解散原生标签组 */
 export function IconUngroup({ className }: { className?: string }) {
   return (
@@ -165,20 +140,6 @@ export function IconWindows({ className }: { className?: string }) {
 }
 
 /** 闲置休眠 */
-export function IconGauge({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
-      <path
-        d="M8 13.5a5.5 5.5 0 1 1 5.2-3.7"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-      <path d="M8 8.5 10.8 5.8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  )
-}
-
 export function IconChevronRight({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 16 16" fill="none" className={cn('size-3.5', className)} aria-hidden>
@@ -191,6 +152,16 @@ export function IconBack({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
       <path d="M10 3.5 5.5 8 10 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+/** 建议关闭：标签页 ×  */
+export function IconCloseTabs({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" className={cn('size-4', className)} aria-hidden>
+      <rect x="1.75" y="3.5" width="12.5" height="9" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+      <path d="m6 6.5 4 4M10 6.5l-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   )
 }
@@ -324,28 +295,3 @@ export function ActionGroup({ children, className }: ActionGroupProps) {
   )
 }
 
-type MetaCardProps = {
-  children: ReactNode
-  className?: string
-  as?: 'div' | 'button'
-} & Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'className' | 'children'>
-
-export function MetaCard({ children, className, as = 'div', disabled, onClick, ...rest }: MetaCardProps) {
-  const cls = cn(
-    'w-full rounded-[11px] border border-black/[0.06] bg-white/70 px-2.5 py-2',
-    'text-left text-[12px] leading-snug text-[#5c5c5f]',
-    'shadow-[0_1px_0_rgba(255,255,255,0.65)_inset]',
-    as === 'button' &&
-      'cursor-pointer transition-[background-color,transform] duration-100 ease-out enabled:hover:bg-white/85 enabled:active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40',
-    className,
-  )
-
-  if (as === 'button') {
-    return (
-      <button type="button" disabled={disabled} onClick={onClick} className={cls} {...rest}>
-        {children}
-      </button>
-    )
-  }
-  return <div className={cls}>{children}</div>
-}

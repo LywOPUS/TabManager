@@ -10,13 +10,11 @@
     "tabGroups",
     "contextMenus",
     "favicon",
-    "scripting",
     "activeTab",
-    "offscreen"
+    "offscreen",
+    "sidePanel"
   ],
   "host_permissions": [
-    "http://127.0.0.1:11434/*",
-    "http://localhost:11434/*",
     "https://huggingface.co/*",
     "https://*.huggingface.co/*",
     "https://cdn-lfs.huggingface.co/*",
@@ -25,13 +23,6 @@
     "https://*.xethub.hf.co/*",
     "https://cdn.jsdelivr.net/*"
   ],
-  "optional_host_permissions": [
-    "https://*/*",
-    "http://*/*"
-  ],
-  "optional_permissions": [
-    "processes"
-  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
   },
@@ -39,9 +30,7 @@
     {
       "resources": [
         "vendor/transformers/*",
-        "vendor/models/*",
-        "popup.html",
-        "mgmt/*"
+        "vendor/models/*"
       ],
       "matches": ["<all_urls>"]
     }
@@ -59,6 +48,9 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "background": {
     "service_worker": "background.js",
