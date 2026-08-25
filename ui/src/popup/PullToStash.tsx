@@ -179,7 +179,7 @@ export function PullToStash({ disabled, onFire, children }: Props) {
 
   return (
     <div
-      className={cn('relative flex flex-col gap-2.5', phase === 'pull' && 'select-none')}
+      className={cn('relative flex flex-col gap-2', phase === 'pull' && 'select-none')}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

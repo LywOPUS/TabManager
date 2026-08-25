@@ -105,34 +105,50 @@ body {
 
 #root { min-height: 100svh; }
 
-/* popup：透明底；页内 iframe 由宿主裁圆角，独立小窗回退时壳自带圆角 */
+/*
+ * default_popup：系统窗是矩形且 Windows 上几乎不透明。
+ * 做法：内容铺满弹窗，用 Ambient 当底，避免「白矩形空壳」；
+ * 圆角只作内层装饰（系统窗四角仍是直角，这是浏览器限制）。
+ */
 html:has(body.popup-body) {
   height: auto !important;
   min-height: 0 !important;
-  background: transparent !important;
+  background: #f8f8f8 !important;
 }
 
 body.popup-body {
-  width: fit-content;
+  width: 280px;
   min-height: 0 !important;
   height: auto !important;
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background: transparent !important;
+  background: #f8f8f8 !important;
   color: var(--foreground);
 }
 
 body.popup-body #root {
-  width: fit-content;
+  width: 280px;
   min-height: 0 !important;
   height: auto !important;
   background: transparent !important;
 }
 
 .popup-shell {
-  border-radius: 16px;
-  background: #f7f7f8;
+  /* 铺满 default_popup，避免壳外再露一圈白边 */
+  border-radius: 0;
+  width: 280px;
+  background: #f8f8f8;
+  overflow: hidden;
+}
+
+/* popup 氛围：纯 CSS，高度变化不闪黑（canvas 改尺寸会先清成黑） */
+.popup-ambient {
+  background:
+    radial-gradient(ellipse 90% 70% at 18% 12%, rgba(214, 218, 226, 0.55), transparent 58%),
+    radial-gradient(ellipse 80% 65% at 88% 58%, rgba(228, 226, 220, 0.48), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 48% 100%, rgba(220, 222, 228, 0.4), transparent 50%),
+    linear-gradient(165deg, #fbfbfb 0%, #f8f8f8 48%, #f4f4f4 100%);
 }
 
 body:not(.popup-body) {

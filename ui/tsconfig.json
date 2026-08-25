@@ -14,12 +14,11 @@
     "strict": true,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
       "@ext/*": ["../extension/*"]
     },
-    "types": ["chrome", "vite/client", "@webgpu/types"]
+    "types": ["chrome", "vite/client"]
   },
   "include": ["src", "management.html"]
 }

@@ -1,39 +1,98 @@
+/**
+ * 管理页：会话是主体（搜索 / 恢复 / 建议分组）。顶栏：收纳、打开标签整理与清理、分类与导入导出。
+ * 弹窗对打开的标签立刻动手，见 popup/PopupApp.tsx。
+ */
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { GlassButton } from '@/components/ui/glasscn/glass-button'
 import { Button } from '@/components/ui/button'
 import { Modal } from '@/components/Modal'
 import { HeightCollapse } from '@/components/HeightCollapse'
-import { ClassifyPicker, type ClassifySettings } from '@/components/ClassifyPicker'
+import {
+  ClassifyPicker,
+  mergeClassifySettings,
+  type ClassifySettings,
+} from '@/components/ClassifyPicker'
+import { ModelLibrary } from '@/components/ModelLibrary'
+import { Favicon, domainOf } from '@/components/Favicon'
+import { timeAgo } from '@/lib/timeAgo'
 import { ToastProvider, useToast } from '@/hooks/useToast'
 import { JetBrainsAmbient } from '@/components/JetBrainsAmbient'
 import { cn } from '@/lib/utils'
-import { stashResultText } from '@/lib/stashResultText'
+import { stashFailText, stashResultText } from '@/lib/stashResultText'
+import { collectSearchHits, highlightMatch, type TabHit } from '@/lib/searchHits'
 import {
   applyEnhancement,
-  applyNativeGroups,
+  applyLivePlan,
   buildExportPayload,
   deleteSession,
+  closeOpenTabDuplicates,
+  closeTabsByIds,
+  collectTabUsage,
+  discardTabsByIds,
+  ensureProcessesPermission,
   findDuplicates,
-  flattenTabs,
+  isActionableUsageRow,
+  processesApiAvailable,
+  findOpenTabDuplicates,
+  defaultIdleMinutes,
+  formatBytes,
+  formatIdle,
   getCurrentWindowOrganizePreview,
   getData,
   getSettings,
+  isReadLaterName,
   isRestorableUrl,
+  isUngroupedName,
+  ensureFixedGroups,
   mergeAndOrganizeCurrent,
   mergeImport,
+  mutateData,
   mergeOrganizeSummary,
+  organizeOkText,
+  moveTabToGroup,
+  dissolveGroup,
+  dissolveFailText,
+  dissolveOkText,
+  dissolvePrompt,
   newId,
+  classifyModeLabel,
+  classifyOptsFromSettings,
   proposeEnhancement,
   removeDuplicates,
   restoreGroup,
   restoreSessionGroups,
-  setData,
   setSettings,
+  organizeFailText,
   sourceLabel,
   tabCount,
+  tabsForSuggest,
   updateSession,
   type Session,
 } from '@/lib/chrome-ext'
+
+type UsageRow = {
+  tabId: number
+  title: string
+  url: string
+  bytes: number | null
+  cpu: number | null
+  idleMs: number | null
+  discarded: boolean
+  active: boolean
+  audible: boolean
+  pinned: boolean
+  sharedProcess: boolean
+  suggestDiscard: boolean
+}
+
+/** 跨会话汇总的稍后阅读条目（附出来源会话，便于跳回） */
+type ReadLaterItem = {
+  sessionId: string
+  sessionName: string
+  groupId: string
+  sessionAt: number
+  tab: Session['groups'][number]['tabs'][number]
+}
 
 type ModalState =
   | { kind: 'none' }
@@ -54,7 +113,12 @@ type ModalState =
       status: string
       busy: boolean
       picker: ClassifySettings
-      preview: { groups: Array<{ name: string; tabs: Array<{ title: string }> }> } | null
+      preview: { groups: Array<{ name: string; action?: string; tabs: Array<{ title: string }> }> } | null
+      plan?: {
+        absorb: Array<{ groupId: number; name: string; tabIds: number[] }>
+        create: Array<{ name: string; tabIds: number[] }>
+        merge: Array<{ keepGroupId: number; name: string; tabIds: number[] }>
+      } | null
       windowId: number | null
       source?: string
     }
@@ -68,79 +132,38 @@ type ModalState =
   | {
       kind: 'dedup'
       removing: boolean
-      groups: Array<{
+      openGroups: Array<{
+        key: string
+        keep: { title: string; active?: boolean }
+        items: Array<{ title: string }>
+      }>
+      stashGroups: Array<{
         key: string
         keep: { title: string; sessionName: string }
         items: Array<{ title: string; sessionName: string }>
       }>
     }
+  | {
+      kind: 'usage'
+      loading: boolean
+      source: string
+      error?: string
+      rows: UsageRow[]
+      suggestedIds: number[]
+      selected: Set<number>
+    }
 
-function domainOf(url: string) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '')
-  } catch {
-    return ''
-  }
-}
-
-function timeAgo(ts: number) {
-  const s = Math.max(1, Math.floor((Date.now() - ts) / 1000))
-  if (s < 60) return '刚刚'
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m} 分钟前`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h} 小时前`
-  const d = Math.floor(h / 24)
-  if (d < 30) return `${d} 天前`
-  const mo = Math.floor(d / 30)
-  if (mo < 12) return `${mo} 个月前`
-  return `${Math.floor(mo / 12)} 年前`
-}
-
-/** _favicon API → 收纳时存的 favIconUrl → 域名首字母 */
-const Favicon = memo(function Favicon({
-  url,
-  favIconUrl,
-  className,
-}: {
-  url: string
-  favIconUrl?: string
-  className?: string
-}) {
-  const [stage, setStage] = useState(0)
-  const host = useMemo(() => domainOf(url), [url])
-  const srcs = useMemo(() => {
-    const extId = globalThis.chrome?.runtime?.id
-    return [
-      extId ? `chrome-extension://${extId}/_favicon/?pageUrl=${encodeURIComponent(url)}&size=32` : null,
-      favIconUrl || null,
-    ].filter(Boolean) as string[]
-  }, [url, favIconUrl])
-
-  if (stage >= srcs.length) {
-    return (
-      <span
-        aria-hidden
-        className={cn(
-          'flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-black/8 text-[9px] font-semibold uppercase text-muted-foreground',
-          className,
-        )}
-      >
-        {host.charAt(0) || '·'}
-      </span>
-    )
-  }
+function HighlightText({ text, query }: { text: string; query: string }) {
+  const hit = highlightMatch(text, query)
+  if (!hit) return text
   return (
-    <img
-      src={srcs[stage]}
-      alt=""
-      loading="lazy"
-      decoding="async"
-      onError={() => setStage((s) => s + 1)}
-      className={cn('size-4 shrink-0 rounded-[4px]', className)}
-    />
+    <>
+      {hit.before}
+      <mark className="rounded-[2px] bg-black/10 text-inherit">{hit.match}</mark>
+      {hit.after}
+    </>
   )
-})
+}
 
 function TextAction({
   danger,
@@ -168,17 +191,22 @@ function TextAction({
   )
 }
 
-function GroupPreviewList({ groups }: { groups: Array<{ name: string; tabs: Array<{ title: string }> }> }) {
+function GroupPreviewList({ groups }: { groups: Array<{ name: string; action?: string; tabs: Array<{ title: string }> }> }) {
   let row = 0
+  const actionText = (action?: string) =>
+    action === 'absorb' ? '并入已有'
+    : action === 'merge' ? '合并同名'
+    : action === 'create' ? '新建'
+    : ''
   return (
     <div className="mt-2 flex flex-col divide-y divide-border/70 border-y border-border/70">
       {groups.map((g) => (
-        <div key={g.name} className="py-2.5">
+        <div key={`${g.action || 'g'}-${g.name}`} className="py-2.5">
           <h3
             className="anim-row m-0 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground"
             style={{ '--row-delay': `${Math.min(row++, 16) * 16}ms` } as React.CSSProperties}
           >
-            {g.name} · {g.tabs.length}
+            {actionText(g.action) ? `${actionText(g.action)} · ${g.name}` : g.name} · {g.tabs.length}
           </h3>
           {g.tabs.map((t, i) => (
             <div
@@ -195,18 +223,6 @@ function GroupPreviewList({ groups }: { groups: Array<{ name: string; tabs: Arra
   )
 }
 
-/** 会话变更时预建小写 haystack，避免每次 keystroke 对全部 tab 做 toLowerCase / URL 解析 */
-function buildSessionHaystack(session: Session) {
-  const parts: string[] = [session.name]
-  for (const g of session.groups) {
-    parts.push(g.name)
-    for (const t of g.tabs) {
-      parts.push(t.title, t.url, domainOf(t.url))
-    }
-  }
-  return parts.join('\n').toLowerCase()
-}
-
 type SessionActions = {
   restoreSession: (sessionId: string, andDelete: boolean) => void
   openSuggest: (sessionId: string) => void
@@ -215,6 +231,8 @@ type SessionActions = {
   restoreOneGroup: (sessionId: string, groupId: string) => void
   openOneTab: (sessionId: string, groupId: string, tabId: string) => void
   deleteOneTab: (sessionId: string, groupId: string, tabId: string) => void
+  moveTabReadLater: (sessionId: string, tabId: string, toReadLater: boolean) => void
+  dissolveOneGroup: (sessionId: string, groupId: string, groupName: string, tabCount: number) => void
 }
 
 const SessionRow = memo(function SessionRow({
@@ -278,13 +296,21 @@ const SessionRow = memo(function SessionRow({
           {session.groups.map((g) => {
             const key = `${session.id}:${g.id}`
             const collapsed = collapsedGroups.has(key)
+            const readLater = isReadLaterName(g.name)
+            const ungrouped = isUngroupedName(g.name)
+            const canDissolve = !ungrouped && !readLater
             return (
               <div key={g.id} className="mt-2">
                 <div className="group/g flex items-center gap-2 py-0.5">
                   <button
                     type="button"
                     aria-expanded={!collapsed}
-                    className="cursor-pointer rounded-sm text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35"
+                    className={cn(
+                      'cursor-pointer rounded-sm text-[11px] font-medium tracking-[0.04em] transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35',
+                      readLater
+                        ? 'normal-case text-foreground/80'
+                        : 'uppercase tracking-[0.08em] text-muted-foreground',
+                    )}
                     onClick={() => {
                       setCollapsedGroups((prev) => {
                         const next = new Set(prev)
@@ -296,8 +322,23 @@ const SessionRow = memo(function SessionRow({
                   >
                     <span aria-hidden>{collapsed ? '▸' : '▾'} </span>
                     {g.name} · {g.tabs.length}
+                    {readLater && (
+                      <span className="ml-1.5 font-normal normal-case tracking-normal text-muted-foreground/70">
+                        （建议分组不改动）
+                      </span>
+                    )}
                   </button>
                   <span aria-hidden className="h-px flex-1 bg-border/60" />
+                  {canDissolve && (
+                    <TextAction
+                      className="text-xs opacity-55 transition-opacity group-hover/g:opacity-100 focus-visible:opacity-100"
+                      onClick={() =>
+                        void a.current.dissolveOneGroup(session.id, g.id, g.name, g.tabs.length)
+                      }
+                    >
+                      解散
+                    </TextAction>
+                  )}
                   <TextAction
                     className="text-xs opacity-55 transition-opacity group-hover/g:opacity-100 focus-visible:opacity-100"
                     onClick={() => void a.current.restoreOneGroup(session.id, g.id)}
@@ -307,6 +348,11 @@ const SessionRow = memo(function SessionRow({
                 </div>
                 <HeightCollapse open={!collapsed}>
                   <div className="mt-0.5 max-h-[min(52vh,420px)] overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
+                    {!g.tabs.length && readLater && (
+                      <p className="px-1 py-1.5 text-[12px] text-muted-foreground/70">
+                        把想留着慢慢看的标签移到这里；整理时不会被重新分组。
+                      </p>
+                    )}
                     {g.tabs.map((t, i) => (
                       <div
                         key={t.id}
@@ -328,6 +374,12 @@ const SessionRow = memo(function SessionRow({
                         </span>
                         <span className="flex shrink-0 items-center gap-2.5 opacity-60 transition-opacity group-hover/row:opacity-100 group-focus-within/row:opacity-100">
                           <TextAction className="text-xs" onClick={() => void a.current.openOneTab(session.id, g.id, t.id)}>打开</TextAction>
+                          <TextAction
+                            className="text-xs"
+                            onClick={() => void a.current.moveTabReadLater(session.id, t.id, !readLater)}
+                          >
+                            {readLater ? '移出' : '稍后阅读'}
+                          </TextAction>
                           <TextAction danger className="text-xs" onClick={() => void a.current.deleteOneTab(session.id, g.id, t.id)}>删除</TextAction>
                         </span>
                       </div>
@@ -347,10 +399,13 @@ function ManagementApp() {
   const { toast } = useToast()
   const [sessions, setSessions] = useState<Session[]>([])
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [view, setView] = useState<'sessions' | 'readLater'>('sessions')
   const [settings, setSettingsState] = useState<ClassifySettings | null>(null)
   const [modal, setModal] = useState<ModalState>({ kind: 'none' })
   const [query, setQuery] = useState('')
   const [stashBusy, setStashBusy] = useState(false)
+  const [showClassify, setShowClassify] = useState(false)
+  const [showModels, setShowModels] = useState(false)
   const importRef = useRef<HTMLInputElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const bootRef = useRef(false)
@@ -362,31 +417,77 @@ function ManagementApp() {
     restoreOneGroup: () => {},
     openOneTab: () => {},
     deleteOneTab: () => {},
+    moveTabReadLater: () => {},
+    dissolveOneGroup: () => {},
   })
 
   const deferredQuery = useDeferredValue(query)
-  const sessionHays = useMemo(
-    () => new Map(sessions.map((s) => [s.id, buildSessionHaystack(s)] as const)),
-    [sessions],
+  const searching = !!deferredQuery.trim()
+  const { tabHits, sessionOnly } = useMemo(
+    () => collectSearchHits(sessions, deferredQuery),
+    [sessions, deferredQuery],
   )
-  const filteredSessions = useMemo(() => {
-    const q = deferredQuery.trim().toLowerCase()
-    if (!q) return sessions
-    return sessions.filter((s) => sessionHays.get(s.id)?.includes(q))
-  }, [sessions, deferredQuery, sessionHays])
-  const liveMatchCount = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return sessions.length
-    let n = 0
-    for (const s of sessions) {
-      if (sessionHays.get(s.id)?.includes(q)) n++
+  const groupedHits = useMemo(() => {
+    const map = new Map<string, { sessionId: string; sessionName: string; hits: TabHit[] }>()
+    for (const hit of tabHits) {
+      let g = map.get(hit.sessionId)
+      if (!g) {
+        g = { sessionId: hit.sessionId, sessionName: hit.sessionName, hits: [] }
+        map.set(hit.sessionId, g)
+      }
+      g.hits.push(hit)
     }
-    return n
-  }, [query, sessions, sessionHays])
+    return [...map.values()]
+  }, [tabHits])
+  const filteredSessions = useMemo(() => {
+    if (searching) return sessionOnly
+    return sessions
+  }, [searching, sessionOnly, sessions])
+
+  /** 全部会话的「稍后阅读」汇总；会话创建时间倒序近似加入顺序 */
+  const readLaterItems = useMemo<ReadLaterItem[]>(() => {
+    const items: ReadLaterItem[] = []
+    for (const s of sessions) {
+      for (const g of s.groups) {
+        if (!isReadLaterName(g.name)) continue
+        for (const tab of g.tabs) {
+          items.push({ sessionId: s.id, sessionName: s.name, groupId: g.id, sessionAt: s.createdAt, tab })
+        }
+      }
+    }
+    items.sort((a, b) => b.sessionAt - a.sessionAt)
+    return items
+  }, [sessions])
+
+  const filteredReadLater = useMemo(() => {
+    const q = deferredQuery.trim().toLowerCase()
+    if (!q) return readLaterItems
+    return readLaterItems.filter(
+      ({ tab, sessionName }) =>
+        tab.title.toLowerCase().includes(q) ||
+        tab.url.toLowerCase().includes(q) ||
+        sessionName.toLowerCase().includes(q),
+    )
+  }, [readLaterItems, deferredQuery])
 
   const reload = useCallback(async () => {
     const data = await getData()
-    setSessions(data.sessions)
+    let dirty = false
+    for (const s of data.sessions) {
+      const hadReadLater = s.groups.some((g) => isReadLaterName(g.name))
+      const hadUngrouped = s.groups.some((g) => isUngroupedName(g.name))
+      ensureFixedGroups(s, { newId })
+      if (!hadReadLater || !hadUngrouped) dirty = true
+    }
+    if (dirty) {
+      const sessions = await mutateData((latest) => {
+        for (const session of latest.sessions) ensureFixedGroups(session, { newId })
+        return latest.sessions
+      })
+      setSessions(sessions)
+    } else {
+      setSessions(data.sessions)
+    }
   }, [])
 
   const closeModal = useCallback(() => setModal({ kind: 'none' }), [])
@@ -394,10 +495,10 @@ function ManagementApp() {
     setExpanded((prev) => (prev === id ? null : id))
   }, [])
 
-  async function persistSettings(patch: Partial<ClassifySettings> & { localModel?: { model: string } }) {
+  async function persistSettings(patch: Partial<ClassifySettings>) {
     const next = await setSettings(patch)
-    setSettingsState(next)
-    return next
+    setSettingsState(next as ClassifySettings)
+    return next as ClassifySettings
   }
 
   async function openLive() {
@@ -413,6 +514,12 @@ function ManagementApp() {
     setModal({ kind: 'merge', summary, picker: s, progress: '', busy: false })
   }
 
+  function openModelLibrary() {
+    setModal({ kind: 'none' })
+    setShowClassify(false)
+    setShowModels(true)
+  }
+
   useEffect(() => {
     if (bootRef.current) return
     bootRef.current = true
@@ -421,17 +528,35 @@ function ManagementApp() {
         setSettingsState(await getSettings())
         await reload()
         const hash = location.hash
-        if (hash === '#merge' || hash === '#organize') {
+        if (
+          hash === '#merge' ||
+          hash === '#organize' ||
+          hash === '#dedup' ||
+          hash === '#usage' ||
+          hash === '#models' ||
+          hash.startsWith('#review=')
+        ) {
           history.replaceState(null, '', location.pathname + location.search)
-          if (hash === '#merge') await openMerge()
-          else await openLive()
+          if (hash === '#models') {
+            setShowModels(true)
+            setShowClassify(false)
+          } else if (hash === '#merge') await openMerge()
+          else if (hash === '#organize') await openLive()
+          else if (hash === '#dedup') await openDedup()
+          else if (hash === '#usage') await openUsage()
+          else {
+            const id = decodeURIComponent(hash.slice('#review='.length))
+            if (id) {
+              setExpanded(id)
+              await openStashReview(id)
+            }
+          }
         }
       } catch {
         setSettingsState({
-          classifyMode: 'site',
-          browserModelId: 'Xenova/all-MiniLM-L6-v2',
+          classifyMode: 'browser',
+          browserModelId: 'onnx-community/embeddinggemma-300m-ONNX',
           preferWebGPU: true,
-          localModel: { model: 'qwen2.5:0.5b' },
         })
       }
     })()
@@ -457,17 +582,17 @@ function ManagementApp() {
     return () => window.removeEventListener('keydown', onKey)
   }, [sessions.length, modal.kind])
 
-  async function onStash() {
+  async function onStash(keepActive = true) {
     if (stashBusy) return
     setStashBusy(true)
     let sessionId: string | null = null
     try {
-      const r = await chrome.runtime.sendMessage({ type: 'STASH_CURRENT_WINDOW' })
+      const r = await chrome.runtime.sendMessage({
+        type: 'STASH_CURRENT_WINDOW',
+        keepActive,
+      })
       if (!r.ok) {
-        if (r.reason === 'empty') toast('没有可收纳的标签')
-        else if (r.reason === 'all_dupe') toast('没有新网页可收纳（本批网址全部重复）')
-        else if (r.reason === 'all_unrestorable') toast('没有可收纳的网页（本地文件等页面无法恢复，已保留）')
-        else toast('收纳失败')
+        toast(stashFailText(r))
         return
       }
       toast(stashResultText(r))
@@ -493,12 +618,9 @@ function ManagementApp() {
       const data = await getData()
       const session = data.sessions.find((x: Session) => x.id === sessionId)
       if (!session) return
-      const { preview, source, name } = await proposeEnhancement(flattenTabs(session), {
-        classifyMode: s.classifyMode,
-        browserModelId: s.browserModelId,
-        preferWebGPU: s.preferWebGPU,
-        baseUrl: s.localModel.baseUrl,
-        model: s.localModel.model,
+      ensureFixedGroups(session, { newId })
+      const { preview, source, name } = await proposeEnhancement(tabsForSuggest(session), {
+        ...classifyOptsFromSettings(s),
         withName: true,
       })
       const r = await applyEnhancement(sessionId, { preview, name })
@@ -512,25 +634,160 @@ function ManagementApp() {
   }
 
   async function openDedup() {
-    const data = await getData()
-    const groups = findDuplicates(data) as Array<{
+    const [openGroups, data] = await Promise.all([findOpenTabDuplicates(), getData()])
+    const stashGroups = findDuplicates(data) as Array<{
       key: string
       keep: { title: string; sessionName: string }
       items: Array<{ title: string; sessionName: string }>
     }>
-    setModal({ kind: 'dedup', groups, removing: false })
+    setModal({
+      kind: 'dedup',
+      openGroups: openGroups as Array<{
+        key: string
+        keep: { title: string; active?: boolean }
+        items: Array<{ title: string }>
+      }>,
+      stashGroups,
+      removing: false,
+    })
+  }
+
+  function usageFromResult(r: {
+    source: string
+    error?: string
+    rows?: UsageRow[]
+    suggestedIds?: number[]
+  }): Extract<ModalState, { kind: 'usage' }> {
+    const suggestedIds = r.suggestedIds || []
+    return {
+      kind: 'usage',
+      loading: false,
+      source: r.source,
+      error: r.error,
+      rows: (r.rows || []) as UsageRow[],
+      suggestedIds,
+      selected: new Set(suggestedIds),
+    }
+  }
+
+  async function openUsage() {
+    setModal({
+      kind: 'usage',
+      loading: true,
+      source: '',
+      rows: [],
+      suggestedIds: [],
+      selected: new Set(),
+    })
+    const preferProcesses = await ensureProcessesPermission()
+    try {
+      setModal(usageFromResult(await collectTabUsage({ preferProcesses })))
+    } catch (e) {
+      setModal({
+        kind: 'usage',
+        loading: false,
+        source: 'idle',
+        error: String((e as Error)?.message || e),
+        rows: [],
+        suggestedIds: [],
+        selected: new Set(),
+      })
+    }
+  }
+
+  async function refreshUsage() {
+    setModal((prev) => (prev.kind === 'usage' ? { ...prev, loading: true } : prev))
+    try {
+      const r = await collectTabUsage({ preferProcesses: processesApiAvailable() })
+      setModal((prev) => (prev.kind === 'usage' ? usageFromResult(r) : prev))
+    } catch (e) {
+      setModal((prev) =>
+        prev.kind === 'usage'
+          ? {
+              kind: 'usage',
+              loading: false,
+              source: 'idle',
+              error: String((e as Error)?.message || e),
+              rows: [],
+              suggestedIds: [],
+              selected: new Set(),
+            }
+          : prev,
+      )
+    }
+  }
+
+  function toggleUsageSelect(tabId: number) {
+    setModal((prev) => {
+      if (prev.kind !== 'usage') return prev
+      const row = prev.rows.find((r) => r.tabId === tabId)
+      if (!row || !isActionableUsageRow(row)) return prev
+      const next = new Set(prev.selected)
+      if (next.has(tabId)) next.delete(tabId)
+      else next.add(tabId)
+      return { ...prev, selected: next }
+    })
+  }
+
+  function actionableSelectedIds() {
+    if (modal.kind !== 'usage') return [] as number[]
+    const byId = new Map(modal.rows.map((r) => [r.tabId, r]))
+    return [...modal.selected].filter((id) => isActionableUsageRow(byId.get(id)))
+  }
+
+  async function discardSelectedUsage() {
+    if (modal.kind !== 'usage') return
+    const ids = actionableSelectedIds()
+    if (!ids.length) {
+      toast('没有可休眠的选中标签（已排除钉住/有声/当前）')
+      return
+    }
+    const n = await discardTabsByIds(ids)
+    toast(n ? `已休眠 ${n} 个标签` : '休眠失败')
+    await refreshUsage()
+  }
+
+  async function discardSuggestedUsage() {
+    if (modal.kind !== 'usage' || !modal.suggestedIds.length) return
+    const byId = new Map(modal.rows.map((r) => [r.tabId, r]))
+    const ids = modal.suggestedIds.filter((id) => isActionableUsageRow(byId.get(id)))
+    if (!ids.length) {
+      toast('没有可休眠的建议标签')
+      return
+    }
+    const n = await discardTabsByIds(ids)
+    toast(n ? `已休眠 ${n} 个闲置标签` : '休眠失败')
+    await refreshUsage()
+  }
+
+  async function closeSelectedUsage() {
+    if (modal.kind !== 'usage') return
+    const ids = actionableSelectedIds()
+    if (!ids.length) {
+      toast('没有可关闭的选中标签（已排除钉住/有声/当前）')
+      return
+    }
+    if (!confirm(`关闭选中的 ${ids.length} 个标签？`)) return
+    const n = await closeTabsByIds(ids)
+    toast(n ? `已关闭 ${n} 个标签` : '关闭失败')
+    await refreshUsage()
   }
 
   async function applyDedup() {
     if (modal.kind !== 'dedup') return
     setModal({ ...modal, removing: true })
-    const data = await getData()
-    const groups = findDuplicates(data)
-    const n = removeDuplicates(data, groups)
-    await setData(data)
+    const openGroups = await findOpenTabDuplicates()
+    const closed = await closeOpenTabDuplicates(openGroups)
+    const removed = await mutateData((data) => removeDuplicates(data, findDuplicates(data)))
     setModal({ kind: 'none' })
     await reload()
-    toast(n ? `已删除 ${n} 个重复标签` : '没有重复可删')
+    if (!closed && !removed) toast('没有重复可合并')
+    else {
+      const parts = []
+      if (closed) parts.push(`关闭 ${closed} 个打开的重复标签`)
+      if (removed) parts.push(`删除 ${removed} 条已收纳重复`)
+      toast(`已合并：${parts.join('，')}`)
+    }
   }
 
   async function openOneTab(sessionId: string, groupId: string, tabId: string) {
@@ -543,17 +800,48 @@ function ManagementApp() {
   }
 
   async function deleteOneTab(sessionId: string, groupId: string, tabId: string) {
-    const data = await getData()
-    const session = data.sessions.find((s: Session) => s.id === sessionId)
-    const group = session.groups.find((g) => g.id === groupId)
-    group.tabs = group.tabs.filter((t) => t.id !== tabId)
-    session.groups = session.groups.filter((g) => g.tabs.length > 0)
-    if (!session.groups.length) {
-      session.groups = [{ id: newId(), name: '未分组', tabs: [] }]
-    }
-    await setData(data)
+    const deleted = await mutateData((data) => {
+      const session = data.sessions.find((s: Session) => s.id === sessionId)
+      if (!session) return false
+      const group = session.groups.find((g) => g.id === groupId)
+      if (!group) return false
+      const before = group.tabs.length
+      group.tabs = group.tabs.filter((t) => t.id !== tabId)
+      session.groups = session.groups.filter(
+        (g) => g.tabs.length > 0 || isReadLaterName(g.name) || isUngroupedName(g.name),
+      )
+      ensureFixedGroups(session, { newId })
+      return group.tabs.length < before
+    })
+    if (!deleted) return
     await reload()
     toast('已删除标签')
+  }
+
+  async function moveTabReadLater(sessionId: string, tabId: string, toReadLater: boolean) {
+    const r = await moveTabToGroup(sessionId, tabId, toReadLater ? 'readLater' : 'ungrouped')
+    if (!r.ok) {
+      toast('移动失败')
+      return
+    }
+    await reload()
+    toast(toReadLater ? '已移入稍后阅读' : '已移出稍后阅读')
+  }
+
+  async function dissolveOneGroup(
+    sessionId: string,
+    groupId: string,
+    groupName: string,
+    n: number,
+  ) {
+    if (!confirm(dissolvePrompt(groupName, n))) return
+    const r = await dissolveGroup(sessionId, groupId)
+    if (!r.ok) {
+      toast(dissolveFailText(r.reason))
+      return
+    }
+    await reload()
+    toast(dissolveOkText(r))
   }
 
   async function restoreOneGroup(sessionId: string, groupId: string) {
@@ -605,6 +893,7 @@ function ManagementApp() {
   async function renameSession(sessionId: string) {
     const data = await getData()
     const session = data.sessions.find((s: Session) => s.id === sessionId)
+    if (!session) return
     const name = prompt('会话名称', session.name)
     if (name == null || !name.trim()) return
     await updateSession(sessionId, { name: name.trim() })
@@ -624,18 +913,16 @@ function ManagementApp() {
     setSettingsState(picker)
     const data = await getData()
     const session = data.sessions.find((s: Session) => s.id === sessionId)
-    const items = flattenTabs(session)
+    if (!session) return
+    ensureFixedGroups(session, { newId })
+    const items = tabsForSuggest(session)
     setModal((prev) =>
       prev.kind === 'suggest'
         ? { ...prev, status: '生成预览', busy: true, preview: null, picker }
         : prev,
     )
     const { preview, source, error, name } = await proposeEnhancement(items, {
-      classifyMode: picker.classifyMode,
-      browserModelId: picker.browserModelId,
-      preferWebGPU: picker.preferWebGPU,
-      baseUrl: picker.localModel.baseUrl,
-      model: picker.localModel.model,
+      ...classifyOptsFromSettings(picker),
       withName,
       onStatus: (m: string) => setModal((prev) => (prev.kind === 'suggest' ? { ...prev, status: m } : prev)),
     })
@@ -677,7 +964,7 @@ function ManagementApp() {
     setSettingsState(picker)
     setModal((prev) =>
       prev.kind === 'live'
-        ? { ...prev, busy: true, status: '生成预览', preview: null, picker }
+        ? { ...prev, busy: true, status: '生成预览', preview: null, plan: null, picker }
         : prev,
     )
     const r = await getCurrentWindowOrganizePreview((m: string) =>
@@ -689,11 +976,9 @@ function ManagementApp() {
           ? {
               ...prev,
               busy: false,
-              status:
-                r.reason === 'too_few' ? '未分组标签太少'
-                : r.reason === 'no_groups' ? '没有可成组的建议'
-                : '无法整理',
+              status: organizeFailText(r.reason, r.error),
               preview: null,
+              plan: null,
               windowId: null,
             }
           : prev,
@@ -707,8 +992,9 @@ function ManagementApp() {
             busy: false,
             status: r.error
               ? `来源：${sourceLabel(r.source)} · ${String(r.error).slice(0, 40)}`
-              : `来源：${sourceLabel(r.source)} · 将为未分组标签创建原生标签组`,
+              : `来源：${sourceLabel(r.source)} · 按分类模型成组，同名并入已有标签组`,
             preview: r.preview,
+            plan: r.plan,
             windowId: r.windowId,
             source: r.source,
           }
@@ -730,11 +1016,10 @@ function ManagementApp() {
 
   async function onImport(file: File) {
     try {
+      if (file.size > 10 * 1024 * 1024) throw new TypeError('导入文件过大')
       const text = await file.text()
       const imported = JSON.parse(text)
-      const data = await getData()
-      mergeImport(data, imported)
-      await setData(data)
+      await mutateData((data) => mergeImport(data, imported))
       toast(`已导入 ${imported.sessions?.length || 0} 个会话`)
       await reload()
     } catch {
@@ -750,6 +1035,12 @@ function ManagementApp() {
     restoreOneGroup: (sessionId, groupId) => { void restoreOneGroup(sessionId, groupId) },
     openOneTab: (sessionId, groupId, tabId) => { void openOneTab(sessionId, groupId, tabId) },
     deleteOneTab: (sessionId, groupId, tabId) => { void deleteOneTab(sessionId, groupId, tabId) },
+    moveTabReadLater: (sessionId, tabId, toReadLater) => {
+      void moveTabReadLater(sessionId, tabId, toReadLater)
+    },
+    dissolveOneGroup: (sessionId, groupId, groupName, n) => {
+      void dissolveOneGroup(sessionId, groupId, groupName, n)
+    },
   }
 
   if (!settings) {
@@ -768,7 +1059,8 @@ function ManagementApp() {
     : modal.kind === 'suggest' ? (modal.proposedName !== undefined ? '收纳完成 · 确认分组' : '建议分组')
     : modal.kind === 'live' ? '整理当前窗口'
     : modal.kind === 'merge' ? '合并并整理到当前窗口'
-    : modal.kind === 'dedup' ? '网页去重'
+    : modal.kind === 'dedup' ? '合并重复网页'
+    : modal.kind === 'usage' ? '闲置休眠'
     : undefined
 
   return (
@@ -777,102 +1069,228 @@ function ManagementApp() {
       <header className="sticky top-0 z-20 flex flex-col gap-2 border-b border-border/80 bg-white/60 px-4 py-2.5 backdrop-blur-[24px] backdrop-saturate-150">
         <div className="flex flex-wrap items-center gap-2.5">
           <h1 className="m-0 text-lg font-semibold tracking-tight">标签管理</h1>
+          <div className="flex shrink-0 items-center rounded-lg bg-black/[0.045] p-0.5" role="tablist" aria-label="视图切换">
+            {(['sessions', 'readLater'] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                role="tab"
+                aria-selected={view === v}
+                className={cn(
+                  'cursor-pointer rounded-[7px] px-2.5 py-1 text-xs transition-colors',
+                  view === v
+                    ? 'bg-white font-medium text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+                onClick={() => setView(v)}
+              >
+                {v === 'sessions'
+                  ? '会话'
+                  : `稍后阅读${readLaterItems.length ? ` ${readLaterItems.length}` : ''}`}
+              </button>
+            ))}
+          </div>
           {sessions.length > 0 && (
             <span className="text-xs tabular-nums text-muted-foreground">
-              {query.trim() ? `${liveMatchCount}/${sessions.length}` : sessions.length} 个会话
+              {searching
+                ? `${tabHits.length} 个标签${sessionOnly.length ? ` · ${sessionOnly.length} 个会话` : ''}`
+                : `${sessions.length} 个会话`}
             </span>
           )}
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <GlassButton disabled={stashBusy} onClick={() => void onStash()}>
-              {stashBusy ? '收纳中…' : '收纳当前窗口'}
+          {sessions.length > 0 && (
+            <>
+              <label className="sr-only" htmlFor="session-search">
+                搜索会话与标签
+              </label>
+              <input
+                ref={searchRef}
+                id="session-search"
+                type="search"
+                value={query}
+                placeholder="搜索标题或网址…（/）"
+                autoComplete="off"
+                className="min-w-[160px] flex-1 rounded-lg border border-transparent bg-black/[0.04] px-3 py-1.5 text-sm text-foreground outline-none transition-[background,box-shadow,border-color] placeholder:text-muted-foreground/65 hover:bg-black/[0.055] focus-visible:border-ring/30 focus-visible:bg-white/90 focus-visible:ring-3 focus-visible:ring-ring/25"
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape' && query) {
+                    e.preventDefault()
+                    setQuery('')
+                    return
+                  }
+                  if (e.key === 'Enter') {
+                    const first = collectSearchHits(sessions, query).tabHits[0]
+                    if (!first) return
+                    e.preventDefault()
+                    void openOneTab(first.sessionId, first.groupId, first.tab.id)
+                  }
+                }}
+              />
+              {query.trim() && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setQuery('')
+                    searchRef.current?.focus()
+                  }}
+                >
+                  清除
+                </Button>
+              )}
+            </>
+          )}
+          <div className="ml-auto flex items-center gap-2">
+            <GlassButton
+              disabled={stashBusy}
+              title="收纳当前窗口里除当前页以外的标签"
+              onClick={() => void onStash(true)}
+            >
+              {stashBusy ? '收纳中…' : '收纳'}
             </GlassButton>
-            <GlassButton variant="outline" disabled={stashBusy} onClick={() => void openLive()}>整理当前窗口</GlassButton>
-            <GlassButton variant="secondary" disabled={stashBusy} onClick={() => void openMerge()}>合并并整理全部窗口</GlassButton>
+            <button
+              type="button"
+              disabled={stashBusy}
+              className="cursor-pointer text-xs text-muted-foreground transition-colors hover:text-foreground hover:underline disabled:opacity-35"
+              onClick={() => void onStash(false)}
+            >
+              连当前页一起收纳
+            </button>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <ClassifyPicker
-            value={settings}
-            onChange={(patch) => { void persistSettings(patch) }}
-          />
-          <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={settings.stashReview !== false}
-              onChange={(e) => { void persistSettings({ stashReview: e.target.checked }) }}
-            />
-            收纳后询问
-          </label>
-          <span className="flex-1" />
-          <Button variant="ghost" size="sm" onClick={() => void openDedup()}>去重</Button>
-          <Button variant="ghost" size="sm" onClick={() => void onExport()}>导出</Button>
-          <Button variant="ghost" size="sm" onClick={() => importRef.current?.click()}>导入</Button>
-          <input
-            ref={importRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0]
-              if (file) void onImport(file)
-              e.target.value = ''
-            }}
-          />
-        </div>
-        {sessions.length > 0 && (
-          <div className="flex items-center gap-2 border-t border-border/50 pt-2">
-            <label className="sr-only" htmlFor="session-search">
-              搜索会话与标签
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          <div className="flex flex-wrap items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={stashBusy}
+              title="预览后应用；已成组标签也可以重分"
+              onClick={() => void openLive()}
+            >
+              整理当前窗口
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={stashBusy}
+              title="把其他窗口的标签并进本窗再整理"
+              onClick={() => void openMerge()}
+            >
+              合并全部窗口
+            </Button>
+            <span className="mx-1 hidden h-3 w-px bg-border/80 sm:block" aria-hidden />
+            <Button
+              variant="ghost"
+              size="sm"
+              title="打开的标签（全部窗口）与已收纳会话"
+              onClick={() => void openDedup()}
+            >
+              合并重复网页
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => void openUsage()}>
+              闲置休眠
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-0.5">
+            <Button
+              variant={showClassify ? 'secondary' : 'ghost'}
+              size="sm"
+              aria-expanded={showClassify}
+              title={classifyModeLabel(settings.classifyMode)}
+              onClick={() => {
+                setShowClassify((v) => !v)
+                setShowModels(false)
+              }}
+            >
+              分类设置
+              <span className="ml-1.5 font-normal text-muted-foreground">
+                {classifyModeLabel(settings.classifyMode)}
+              </span>
+            </Button>
+            <Button
+              variant={showModels ? 'secondary' : 'ghost'}
+              size="sm"
+              aria-expanded={showModels}
+              title="下载、删除浏览器内小模型"
+              onClick={() => {
+                setShowModels((v) => !v)
+                setShowClassify(false)
+              }}
+            >
+              模型
+            </Button>
+            <label className="inline-flex cursor-pointer items-center gap-1.5 px-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={settings.stashReview !== false}
+                onChange={(e) => { void persistSettings({ stashReview: e.target.checked }) }}
+              />
+              收纳后询问
             </label>
+            <Button variant="ghost" size="sm" onClick={() => void onExport()}>导出</Button>
+            <Button variant="ghost" size="sm" onClick={() => importRef.current?.click()}>导入</Button>
             <input
-              ref={searchRef}
-              id="session-search"
-              type="search"
-              value={query}
-              placeholder="搜索会话、标题或网址…（/）"
-              autoComplete="off"
-              className="min-w-0 flex-1 rounded-lg border border-transparent bg-black/[0.04] px-3 py-1.5 text-sm text-foreground outline-none transition-[background,box-shadow,border-color] placeholder:text-muted-foreground/65 hover:bg-black/[0.055] focus-visible:border-ring/30 focus-visible:bg-white/90 focus-visible:ring-3 focus-visible:ring-ring/25"
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape' && query) {
-                  e.preventDefault()
-                  setQuery('')
-                }
+              ref={importRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) void onImport(file)
+                e.target.value = ''
               }}
             />
-            {query.trim() && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setQuery('')
-                  searchRef.current?.focus()
-                }}
-              >
-                清除
-              </Button>
-            )}
+          </div>
+        </div>
+        {showClassify && (
+          <div className="border-t border-border/50 pt-2">
+            <ClassifyPicker
+              value={settings}
+              onChange={(patch) => { void persistSettings(patch) }}
+              onOpenLibrary={() => {
+                setShowClassify(false)
+                setShowModels(true)
+              }}
+            />
+          </div>
+        )}
+        {showModels && (
+          <div className="border-t border-border/50 pt-2">
+            <ModelLibrary
+              currentModelId={settings.browserModelId}
+              preferWebGPU={settings.preferWebGPU !== false}
+              onUse={(id) => { void persistSettings({ browserModelId: id }) }}
+            />
           </div>
         )}
       </header>
 
       <main className="relative z-10 mx-auto flex max-w-[880px] flex-col px-4 py-4 pb-16">
-        {!sessions.length && (
+        {view === 'sessions' && !sessions.length && (
           <div className="mt-6 flex flex-col items-center gap-4 rounded-2xl border border-dashed border-border/90 bg-white/40 px-6 py-20 text-center backdrop-blur-[8px]">
             <div className="flex flex-col gap-1.5">
               <p className="m-0 text-[15px] font-medium tracking-tight text-foreground/90">还没有会话</p>
-              <p className="m-0 text-sm text-muted-foreground">收纳当前窗口，把标签整理到这里</p>
+              <p className="m-0 text-sm text-muted-foreground">收纳当前窗口，当前页会留下</p>
             </div>
-            <GlassButton disabled={stashBusy} onClick={() => void onStash()}>
-              {stashBusy ? '收纳中…' : '收纳当前窗口'}
-            </GlassButton>
+            <div className="flex flex-col items-center gap-2">
+              <GlassButton disabled={stashBusy} onClick={() => void onStash(true)}>
+                {stashBusy ? '收纳中…' : '收纳'}
+              </GlassButton>
+              <button
+                type="button"
+                disabled={stashBusy}
+                className="cursor-pointer text-xs text-muted-foreground hover:text-foreground hover:underline disabled:opacity-35"
+                onClick={() => void onStash(false)}
+              >
+                连当前页一起收纳
+              </button>
+            </div>
           </div>
         )}
 
-        {sessions.length > 0 && !filteredSessions.length && (
+        {view === 'sessions' && sessions.length > 0 && searching && !tabHits.length && !sessionOnly.length && (
           <div className="mt-2 rounded-xl border border-border/70 bg-white/50 px-4 py-14 text-center" role="status">
             <p className="m-0 text-sm text-muted-foreground">
-              没有匹配「{query.trim()}」的会话
+              没有匹配「{query.trim()}」的标签
             </p>
             <Button
               variant="ghost"
@@ -888,17 +1306,150 @@ function ManagementApp() {
           </div>
         )}
 
-        {filteredSessions.length > 0 && (
+        {view === 'sessions' && searching && groupedHits.length > 0 && (
           <div className="overflow-hidden rounded-xl border border-border/90 bg-white/92 shadow-[0_1px_2px_rgba(0,0,0,0.035)]">
+            <div className="divide-y divide-border/70">
+              {groupedHits.map((block) => (
+                <section key={block.sessionId} className="px-3.5 py-2.5">
+                  <div className="mb-1 flex items-center gap-2">
+                    <h2 className="m-0 min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight">
+                      {block.sessionName}
+                    </h2>
+                    <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                      {block.hits.length}
+                    </span>
+                    <TextAction
+                      className="text-xs"
+                      onClick={() => void actionsRef.current.restoreSession(block.sessionId, false)}
+                    >
+                      全部恢复
+                    </TextAction>
+                  </div>
+                  <div className="flex flex-col">
+                    {block.hits.slice(0, 40).map((hit) => (
+                      <div
+                        key={`${hit.sessionId}:${hit.tab.id}`}
+                        className="group/row -mx-1 flex items-center gap-2 rounded-md px-1 py-[4px] hover:bg-black/[0.035]"
+                      >
+                        <Favicon url={hit.tab.url} favIconUrl={hit.tab.favIconUrl} />
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 cursor-pointer truncate text-left text-[13px] leading-[18px] text-foreground/85 hover:text-foreground"
+                          title={hit.tab.url}
+                          onClick={() => void openOneTab(hit.sessionId, hit.groupId, hit.tab.id)}
+                        >
+                          <HighlightText text={hit.tab.title} query={deferredQuery} />
+                        </button>
+                        <span className="hidden max-w-[120px] shrink-0 truncate text-[11px] text-muted-foreground/55 sm:block">
+                          {hit.groupName}
+                        </span>
+                        <TextAction
+                          className="text-xs opacity-60 group-hover/row:opacity-100"
+                          onClick={() => void openOneTab(hit.sessionId, hit.groupId, hit.tab.id)}
+                        >
+                          打开
+                        </TextAction>
+                      </div>
+                    ))}
+                    {block.hits.length > 40 && (
+                      <p className="m-0 px-1 py-1 text-[11px] text-muted-foreground">
+                        仅显示前 40 条
+                      </p>
+                    )}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {view === 'sessions' && filteredSessions.length > 0 && (
+          <div className={searching && groupedHits.length > 0 ? 'mt-3 overflow-hidden rounded-xl border border-border/90 bg-white/92 shadow-[0_1px_2px_rgba(0,0,0,0.035)]' : 'overflow-hidden rounded-xl border border-border/90 bg-white/92 shadow-[0_1px_2px_rgba(0,0,0,0.035)]'}>
+            {searching && groupedHits.length > 0 && sessionOnly.length > 0 && (
+              <p className="m-0 border-b border-border/70 px-3.5 py-2 text-[11px] text-muted-foreground">
+                会话名匹配
+              </p>
+            )}
             <div className="divide-y divide-border/70">
               {filteredSessions.map((session) => (
                 <SessionRow
                   key={session.id}
                   session={session}
-                  open={expanded === session.id}
+                  open={searching || expanded === session.id}
                   onToggle={onToggleSession}
                   actionsRef={actionsRef}
                 />
+              ))}
+            </div>
+          </div>
+        )}
+        {view === 'readLater' && !readLaterItems.length && (
+          <div className="mt-6 flex flex-col items-center gap-4 rounded-2xl border border-dashed border-border/90 bg-white/40 px-6 py-20 text-center backdrop-blur-[8px]">
+            <div className="flex flex-col gap-1.5">
+              <p className="m-0 text-[15px] font-medium tracking-tight text-foreground/90">还没有稍后阅读</p>
+              <p className="m-0 text-sm text-muted-foreground">在会话的标签行点「稍后阅读」，就会汇聚到这里</p>
+            </div>
+          </div>
+        )}
+
+        {view === 'readLater' && readLaterItems.length > 0 && !filteredReadLater.length && (
+          <div className="mt-2 rounded-xl border border-border/70 bg-white/50 px-4 py-14 text-center" role="status">
+            <p className="m-0 text-sm text-muted-foreground">没有匹配「{query.trim()}」的稍后阅读</p>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mt-2"
+              onClick={() => {
+                setQuery('')
+                searchRef.current?.focus()
+              }}
+            >
+              清除搜索
+            </Button>
+          </div>
+        )}
+
+        {view === 'readLater' && filteredReadLater.length > 0 && (
+          <div className="overflow-hidden rounded-xl border border-border/90 bg-white/92 shadow-[0_1px_2px_rgba(0,0,0,0.035)]">
+            <div className="divide-y divide-border/70">
+              {filteredReadLater.map(({ sessionId, sessionName, groupId, sessionAt, tab }, i) => (
+                <div
+                  key={tab.id}
+                  className={cn(
+                    'group/row flex items-center gap-2 px-3.5 py-2 transition-colors hover:bg-black/[0.02]',
+                    i < 12 && 'anim-row',
+                  )}
+                  style={i < 12 ? ({ '--row-delay': `${i * 18}ms` } as React.CSSProperties) : undefined}
+                >
+                  <Favicon url={tab.url} favIconUrl={tab.favIconUrl} />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px] leading-[18px] text-foreground/85" title={tab.url}>
+                      <HighlightText text={tab.title} query={deferredQuery} />
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/70">
+                      <span className="shrink-0">{domainOf(tab.url)}</span>
+                      <span aria-hidden>·</span>
+                      <button
+                        type="button"
+                        title="跳转到来源会话"
+                        className="min-w-0 cursor-pointer truncate transition-colors hover:text-foreground hover:underline"
+                        onClick={() => {
+                          setView('sessions')
+                          setExpanded(sessionId)
+                        }}
+                      >
+                        {sessionName}
+                      </button>
+                      <span aria-hidden>·</span>
+                      <span className="shrink-0">{timeAgo(sessionAt)}</span>
+                    </div>
+                  </div>
+                  <span className="flex shrink-0 items-center gap-2.5 opacity-60 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100">
+                    <TextAction className="text-xs" onClick={() => void openOneTab(sessionId, groupId, tab.id)}>打开</TextAction>
+                    <TextAction className="text-xs" onClick={() => void moveTabReadLater(sessionId, tab.id, false)}>移出</TextAction>
+                    <TextAction danger className="text-xs" onClick={() => void deleteOneTab(sessionId, groupId, tab.id)}>删除</TextAction>
+                  </span>
+                </div>
               ))}
             </div>
           </div>
@@ -908,7 +1459,14 @@ function ManagementApp() {
       <Modal
         open={modal.kind !== 'none'}
         label={modalLabel}
-        dismissible={!(modal.kind === 'busy' || (modal.kind === 'merge' && modal.busy) || (modal.kind === 'dedup' && modal.removing))}
+        dismissible={
+          !(
+            modal.kind === 'busy' ||
+            (modal.kind === 'merge' && modal.busy) ||
+            (modal.kind === 'dedup' && modal.removing) ||
+            (modal.kind === 'usage' && modal.loading)
+          )
+        }
         onClose={closeModal}
       >
         {modal.kind === 'busy' && (
@@ -927,13 +1485,10 @@ function ManagementApp() {
               className="mt-2.5"
               value={modal.picker}
               onChange={(patch) => {
-                const next = {
-                  ...modal.picker,
-                  ...patch,
-                  localModel: { ...modal.picker.localModel, ...(patch.localModel || {}) },
-                }
+                const next = mergeClassifySettings(modal.picker, patch)
                 void runSuggest(modal.sessionId, next, modal.proposedName !== undefined)
               }}
+              onOpenLibrary={openModelLibrary}
             />
             <p className={cn('mt-2 rounded-[10px] bg-black/[0.04] px-3 py-2.5 text-[13px]', modal.busy && 'opacity-80')}>
               {modal.status}
@@ -988,17 +1543,17 @@ function ManagementApp() {
         {modal.kind === 'live' && (
           <>
             <h2 className="m-0 text-[17px] font-semibold tracking-tight">整理当前窗口</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              用当前分类模型给本窗标签分组。已在标签组里的也可以抽走重分。模型组名与已有标签组相同时并入，否则新建。失败不会改回按站点。应用后折叠非当前组。
+            </p>
             <ClassifyPicker
               className="mt-2.5"
               value={modal.picker}
               onChange={(patch) => {
-                const next = {
-                  ...modal.picker,
-                  ...patch,
-                  localModel: { ...modal.picker.localModel, ...(patch.localModel || {}) },
-                }
+                const next = mergeClassifySettings(modal.picker, patch)
                 void runLivePreview(next)
               }}
+              onOpenLibrary={openModelLibrary}
             />
             <p className={cn('mt-2 rounded-[10px] bg-black/[0.04] px-3 py-2.5 text-[13px]', modal.busy && 'opacity-80')}>
               {modal.status}
@@ -1008,17 +1563,39 @@ function ManagementApp() {
               <Button variant="outline" onClick={() => setModal({ kind: 'none' })}>取消</Button>
               <Button variant="secondary" disabled={modal.busy} onClick={() => void runLivePreview(modal.picker)}>重新预览</Button>
               <Button
-                disabled={!modal.preview || modal.windowId == null || modal.busy}
+                disabled={!modal.plan || modal.windowId == null || modal.busy}
                 onClick={() => {
-                  if (!modal.preview || modal.windowId == null) return
+                  if (!modal.plan || modal.windowId == null) return
+                  const source = modal.source
+                  const plan = modal.plan
                   void (async () => {
                     await setSettings(modal.picker)
-                    setModal((prev) => (prev.kind === 'live' ? { ...prev, busy: true, status: '正在创建标签组' } : prev))
-                    await applyNativeGroups(modal.windowId!, modal.preview!, (m: string) =>
-                      setModal((prev) => (prev.kind === 'live' ? { ...prev, status: m } : prev)),
-                    )
-                    setModal({ kind: 'none' })
-                    toast(`已整理当前窗口（${sourceLabel(modal.source)}）`)
+                    setModal((prev) => (prev.kind === 'live' ? { ...prev, busy: true, status: '正在整理标签组' } : prev))
+                    try {
+                      const applied = await applyLivePlan(modal.windowId!, plan, (m: string) =>
+                        setModal((prev) => (prev.kind === 'live' ? { ...prev, status: m } : prev)),
+                      )
+                      setModal({ kind: 'none' })
+                      if (!applied?.ok) {
+                        if (applied?.reason === 'partial') {
+                          toast(
+                            `部分完成：并入 ${applied.absorbTabs || 0} · 新建 ${applied.created || 0} · 失败 ${applied.failed?.length || 0}`,
+                          )
+                        } else {
+                          const detail = applied?.failed?.[0]?.error
+                          toast(detail ? `分组失败：${detail}` : '分组失败，已有标签组未改')
+                        }
+                        return
+                      }
+                      toast(organizeOkText({ apply: applied, source }))
+                    } catch (e) {
+                      setModal((prev) =>
+                        prev.kind === 'live'
+                          ? { ...prev, busy: false, status: String((e as Error)?.message || e) }
+                          : prev,
+                      )
+                      toast(`整理未完成：${String((e as Error)?.message || e)}`)
+                    }
                   })()
                 }}
               >
@@ -1043,17 +1620,11 @@ function ManagementApp() {
               onChange={(patch) =>
                 setModal((prev) =>
                   prev.kind === 'merge'
-                    ? {
-                        ...prev,
-                        picker: {
-                          ...prev.picker,
-                          ...patch,
-                          localModel: { ...prev.picker.localModel, ...(patch.localModel || {}) },
-                        },
-                      }
+                    ? { ...prev, picker: mergeClassifySettings(prev.picker, patch) }
                     : prev,
                 )
               }
+              onOpenLibrary={openModelLibrary}
             />
             {modal.progress && (
               <p className="mt-2 rounded-[10px] bg-black/[0.04] px-3 py-2.5 text-[13px]">{modal.progress}</p>
@@ -1073,16 +1644,18 @@ function ManagementApp() {
                           setModal((prev) => (prev.kind === 'merge' ? { ...prev, progress: msg } : prev)),
                       })
                       if (!r.ok) {
-                        if (r.reason === 'no_groups') toast('没有可成组的建议')
-                        else if (r.reason === 'too_few') toast('可整理标签太少')
-                        else toast('整理失败')
+                        if (r.reason === 'partial') {
+                          toast(
+                            `已拆组但未完成：成功 ${r.apply?.created || 0} 组，失败 ${r.apply?.failed?.length || 0} 组`,
+                          )
+                        } else toast(organizeFailText(r.reason, r.error))
                         setModal({ kind: 'none' })
                         return
                       }
                       setModal({ kind: 'none' })
                       toast(`已合并并整理（${sourceLabel(r.source)}）`)
-                    } catch {
-                      toast('整理出错')
+                    } catch (e) {
+                      toast(`已拆组但未完成：${String((e as Error)?.message || e)}`)
                       setModal({ kind: 'none' })
                     }
                   })()
@@ -1095,38 +1668,168 @@ function ManagementApp() {
         )}
         {modal.kind === 'dedup' && (
           <>
-            <h2 className="m-0 text-[17px] font-semibold tracking-tight">网页去重</h2>
+            <h2 className="m-0 text-[17px] font-semibold tracking-tight">合并重复网页</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              只处理完全相同的网址（逐字一致），保留最新收纳的一份。
+              打开的标签扫全部窗口；已收纳会话另计。忽略尾斜杠 / www；保留 hash、query 与端口。打开的优先留当前页；收纳同会话优先留主题组。
             </p>
-            {!modal.groups.length && (
+            {!modal.openGroups.length && !modal.stashGroups.length && (
               <p className="mt-3 text-sm text-muted-foreground">没有发现重复网页。</p>
             )}
-            {modal.groups.length > 0 && (
-              <div className="mt-2 flex max-h-[46vh] flex-col divide-y divide-border/70 overflow-auto border-y border-border/70">
-                {modal.groups.map((g) => (
-                  <div key={g.key} className="py-2">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="min-w-0 truncate text-[13px] font-medium">{g.keep.title}</span>
-                      <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-                        ×{g.items.length + 1}
-                      </span>
-                    </div>
-                    <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                      保留于「{g.keep.sessionName}」 · 删除 {g.items.length} 份（
-                      {g.items.map((d) => d.sessionName).join('、')}）
-                    </div>
+            <div className="mt-2 flex max-h-[46vh] flex-col gap-3 overflow-auto">
+              {modal.openGroups.length > 0 && (
+                <div>
+                  <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+                    全部窗口中打开的标签 · {modal.openGroups.reduce((n, g) => n + g.items.length, 0)} 个可关
                   </div>
-                ))}
-              </div>
-            )}
+                  <div className="flex flex-col divide-y divide-border/70 border-y border-border/70">
+                    {modal.openGroups.map((g) => (
+                      <div key={`o-${g.key}`} className="py-2">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="min-w-0 truncate text-[13px] font-medium">{g.keep.title}</span>
+                          <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                            ×{g.items.length + 1}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                          保留打开中的一份{g.keep.active ? '（当前标签）' : ''} · 关闭 {g.items.length} 个
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {modal.stashGroups.length > 0 && (
+                <div>
+                  <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+                    已收纳 · {modal.stashGroups.reduce((n, g) => n + g.items.length, 0)} 条可删
+                  </div>
+                  <div className="flex flex-col divide-y divide-border/70 border-y border-border/70">
+                    {modal.stashGroups.map((g) => (
+                      <div key={`s-${g.key}`} className="py-2">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="min-w-0 truncate text-[13px] font-medium">{g.keep.title}</span>
+                          <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                            ×{g.items.length + 1}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                          保留于「{g.keep.sessionName}」 · 删除 {g.items.length} 份
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
             <div className="mt-4 flex flex-wrap justify-end gap-2">
               <Button variant="outline" disabled={modal.removing} onClick={() => setModal({ kind: 'none' })}>取消</Button>
               <Button
-                disabled={!modal.groups.length || modal.removing}
+                disabled={
+                  modal.removing || (!modal.openGroups.length && !modal.stashGroups.length)
+                }
                 onClick={() => void applyDedup()}
               >
-                {modal.removing ? '删除中…' : `删除重复（${modal.groups.reduce((n, g) => n + g.items.length, 0)}）`}
+                {modal.removing
+                  ? '合并中…'
+                  : `合并（关 ${modal.openGroups.reduce((n, g) => n + g.items.length, 0)} / 删 ${modal.stashGroups.reduce((n, g) => n + g.items.length, 0)}）`}
+              </Button>
+            </div>
+          </>
+        )}
+        {modal.kind === 'usage' && (
+          <>
+            <p className="text-sm text-muted-foreground">
+              按最近访问排序。默认勾选闲置 ≥{defaultIdleMinutes()}{' '}
+              分钟、非当前/非钉住/无声音的标签；休眠后点开即恢复。
+              {modal.source.includes('processes') ? '（Dev 另附进程内存参考）' : ''}
+              {modal.error ? ` ${modal.error}` : ''}
+            </p>
+            {modal.loading ? (
+              <p className="mt-3 text-sm text-muted-foreground">加载中…</p>
+            ) : (
+              <div className="mt-3 max-h-[min(52vh,420px)] overflow-y-auto">
+                {!modal.rows.length ? (
+                  <p className="text-sm text-muted-foreground">没有可列出的标签。</p>
+                ) : (
+                  <ul className="flex flex-col divide-y divide-border/70 border-y border-border/70">
+                    {modal.rows.map((row) => (
+                      <li key={row.tabId} className="flex items-start gap-2 py-2">
+                        <input
+                          type="checkbox"
+                          className="mt-1"
+                          checked={modal.selected.has(row.tabId)}
+                          disabled={!isActionableUsageRow(row)}
+                          onChange={() => toggleUsageSelect(row.tabId)}
+                          aria-label={`选择 ${row.title}`}
+                        />
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 text-left"
+                          onClick={() => {
+                            setModal((prev) => {
+                              if (prev.kind !== 'usage') return prev
+                              const next = new Set(prev.selected)
+                              next.delete(row.tabId)
+                              return { ...prev, selected: next }
+                            })
+                            void chrome.tabs.update(row.tabId, { active: true }).then((tab) => {
+                              if (tab?.windowId != null) {
+                                void chrome.windows.update(tab.windowId, { focused: true })
+                              }
+                            })
+                          }}
+                        >
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="min-w-0 truncate text-[13px] font-medium">
+                              {row.title || '（无标题）'}
+                              {row.suggestDiscard ? ' · 建议休眠' : ''}
+                              {row.active ? ' · 当前' : ''}
+                              {row.discarded ? ' · 已休眠' : ''}
+                              {row.audible ? ' · 有声音' : ''}
+                              {row.pinned ? ' · 钉住' : ''}
+                            </span>
+                            <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                              {formatIdle(row.idleMs)}
+                              {row.bytes != null ? ` · ${formatBytes(row.bytes)}` : ''}
+                            </span>
+                          </div>
+                          <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                            {row.url}
+                            {row.sharedProcess ? ' · 共享进程' : ''}
+                          </div>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <Button variant="outline" disabled={modal.loading} onClick={() => void refreshUsage()}>
+                刷新
+              </Button>
+              <Button
+                disabled={modal.loading || !modal.suggestedIds.length}
+                onClick={() => void discardSuggestedUsage()}
+              >
+                休眠建议（{modal.suggestedIds.length}）
+              </Button>
+              <Button
+                variant="outline"
+                disabled={modal.loading || !modal.selected.size}
+                onClick={() => void discardSelectedUsage()}
+              >
+                休眠选中
+              </Button>
+              <Button
+                variant="outline"
+                disabled={modal.loading || !modal.selected.size}
+                onClick={() => void closeSelectedUsage()}
+              >
+                关闭选中
+              </Button>
+              <Button variant="outline" disabled={modal.loading} onClick={() => setModal({ kind: 'none' })}>
+                关闭
               </Button>
             </div>
           </>

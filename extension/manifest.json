@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Tab Manager",
   "description": "OneTab 式收纳 + Edge 式本地整理",
-  "version": "0.2.3",
+  "version": "0.2.5",
   "permissions": [
     "storage",
     "unlimitedStorage",
@@ -10,15 +10,17 @@
     "tabGroups",
     "contextMenus",
     "favicon",
-    "scripting",
-    "activeTab"
+    "activeTab",
+    "offscreen",
+    "sidePanel"
   ],
   "host_permissions": [
-    "http://127.0.0.1:11434/*",
-    "http://localhost:11434/*",
     "https://huggingface.co/*",
     "https://*.huggingface.co/*",
     "https://cdn-lfs.huggingface.co/*",
+    "https://hf-mirror.com/*",
+    "https://*.hf.co/*",
+    "https://*.xethub.hf.co/*",
     "https://cdn.jsdelivr.net/*"
   ],
   "content_security_policy": {
@@ -28,14 +30,13 @@
     {
       "resources": [
         "vendor/transformers/*",
-        "vendor/models/*",
-        "popup.html",
-        "mgmt/*"
+        "vendor/models/*"
       ],
       "matches": ["<all_urls>"]
     }
   ],
   "action": {
+    "default_popup": "popup.html",
     "default_title": "Tab Manager",
     "default_icon": {
       "16": "icons/icon16.png",
@@ -48,8 +49,27 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
+  },
+  "commands": {
+    "stash-other-tabs": {
+      "suggested_key": {
+        "default": "Alt+Shift+S",
+        "mac": "Alt+Shift+S"
+      },
+      "description": "收纳其他标签（保留当前页）"
+    },
+    "open-management": {
+      "suggested_key": {
+        "default": "Alt+Shift+M",
+        "mac": "Alt+Shift+M"
+      },
+      "description": "打开标签管理"
+    }
   }
 }
