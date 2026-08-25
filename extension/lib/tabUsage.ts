@@ -40,8 +40,20 @@ export function formatBytes(n: number | null | undefined) {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function lastAccessedNumber(tab: object): number | null {
-  return optFiniteNumber((tab as { lastAccessed?: unknown }).lastAccessed) ?? null;
+/** 小于 1e12（约 2001）含 0，不当访问时间。 */
+const MIN_ACCESSED_MS = 1e12;
+
+export function tabLastAccessedMs(tab: object | null | undefined): number | null {
+  if (!tab) return null;
+  const raw = optFiniteNumber((tab as { lastAccessed?: unknown }).lastAccessed);
+  if (raw == null || raw < MIN_ACCESSED_MS) return null;
+  return raw;
+}
+
+export function tabIdleMs(tab: object | null | undefined, now = Date.now()): number | null {
+  const at = tabLastAccessedMs(tab);
+  if (at == null) return null;
+  return Math.max(0, now - at);
 }
 
 export function formatIdle(ms: number | null | undefined) {
@@ -124,7 +136,7 @@ function tabMeta(tab: chrome.tabs.Tab & { id: number }) {
     active: !!tab.active,
     audible: !!tab.audible,
     pinned: !!tab.pinned,
-    lastAccessed: lastAccessedNumber(tab),
+    lastAccessed: tabLastAccessedMs(tab),
   };
 }
 
@@ -212,8 +224,7 @@ export async function collectTabUsage(opts: {
 
   const rows = candidates.map((tab) => {
     const base = tabMeta(tab);
-    const idleMsVal =
-      base.lastAccessed != null ? Math.max(0, now - base.lastAccessed) : null;
+    const idleMsVal = tabIdleMs(tab, now);
     const row: UsageRow = {
       ...base,
       idleMs: idleMsVal,
