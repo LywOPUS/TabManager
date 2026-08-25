@@ -6,8 +6,7 @@
  */
 import { normalizeUrlForDedup } from './dedup.js'
 import { getData, type StoreData } from './storage.js'
-import { formatIdle } from './tabUsage.js'
-import { optFiniteNumber } from './unknown.js'
+import { formatIdle, tabIdleMs, tabLastAccessedMs } from './tabUsage.js'
 import { isStashableTab } from './urls.js'
 
 /** 闲置多久算「可关」 */
@@ -71,18 +70,13 @@ export async function collectClosableTabs(opts: { idleMs?: number } = {}): Promi
   const dupeIds = new Set<number>()
   for (const arr of byKey.values()) {
     if (arr.length < 2) continue;
-    const sorted = [...arr].sort(
-      (a, b) =>
-        (optFiniteNumber((b as { lastAccessed?: unknown }).lastAccessed) || 0) -
-        (optFiniteNumber((a as { lastAccessed?: unknown }).lastAccessed) || 0),
-    );
+    const sorted = [...arr].sort((a, b) => (tabLastAccessedMs(b) || 0) - (tabLastAccessedMs(a) || 0));
     for (const t of sorted.slice(1)) dupeIds.add(t.id)
   }
 
   const rows = actionable.map((t) => {
     const url = t.url || t.pendingUrl || '';
-    const lastAccessed = optFiniteNumber((t as { lastAccessed?: unknown }).lastAccessed);
-    const idleMs = lastAccessed != null ? Math.max(0, now - lastAccessed) : null;
+    const idleMs = tabIdleMs(t, now);
     const reasons: string[] = []
     if (dupeIds.has(t.id)) reasons.push('重复打开')
     const k = normalizeUrlForDedup(url);

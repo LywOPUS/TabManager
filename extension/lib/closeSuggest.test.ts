@@ -31,6 +31,7 @@ globalThis.chrome = {
       fakeTab({ id: 8, url: 'https://audible.com/', audible: true }), // 有声 → 排除
       fakeTab({ id: 9, url: 'chrome://extensions' }), // 不可收纳 → 排除
       fakeTab({ id: 10, url: 'https://frozen.com/', discarded: true }), // 已休眠
+      fakeTab({ id: 11, url: 'https://epoch.com/', lastAccessed: 0 }), // 无效时间戳，不当闲置
     ],
   },
   storage: {
@@ -56,7 +57,7 @@ globalThis.chrome = {
 
 try {
   const { rows, actionableCount } = await collectClosableTabs();
-  assert.equal(actionableCount, 6, '排除钉住/有声/当前页/不可收纳协议');
+  assert.equal(actionableCount, 7, '排除钉住/有声/当前页/不可收纳协议');
 
   const byId = new Map(rows.map((r) => [r.tabId, r]));
   assert.ok(byId.get(1).reasons.includes('已收纳'), '归一化后命中收纳会话（www/尾斜杠差异）');
@@ -65,6 +66,8 @@ try {
   assert.ok(byId.get(4).reasons.some((r) => r.startsWith('闲置')));
   assert.ok(byId.get(10).reasons.includes('已休眠'));
   assert.equal(byId.get(5).reasons.length, 0, '刚用过的无理由');
+  assert.equal(byId.get(11).idleMs, null, 'lastAccessed=0 不当成 1970');
+  assert.ok(!byId.get(11).reasons.some((r) => r.startsWith('闲置')));
 
   // 排序：理由多的在前
   for (let i = 1; i < rows.length; i++) {

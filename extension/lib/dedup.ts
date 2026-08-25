@@ -13,8 +13,8 @@ import {
   isUngroupedName,
   pruneEmptyKeepFixed,
 } from './groupNames.js';
+import { tabLastAccessedMs } from './tabUsage.js';
 import { isStashableTab } from './urls.js';
-import { optFiniteNumber } from './unknown.js';
 
 export type StashDupeLoc = { sessionId: string; sessionName: string; tabId: string; title: string; url: string }
 export type StashDupeGroup = { key: string; keep: StashDupeLoc; items: StashDupeLoc[] }
@@ -162,8 +162,8 @@ function openTabLoc(tab: chrome.tabs.Tab & { id: number }): OpenDupeLoc {
 /** 保留优先级：当前激活 > 最近访问 > 更靠左的标签 */
 function compareOpenTabsForKeep(a: chrome.tabs.Tab, b: chrome.tabs.Tab) {
   if (a.active !== b.active) return a.active ? -1 : 1;
-  const la = optFiniteNumber((a as { lastAccessed?: unknown }).lastAccessed) || 0;
-  const lb = optFiniteNumber((b as { lastAccessed?: unknown }).lastAccessed) || 0;
+  const la = tabLastAccessedMs(a) || 0;
+  const lb = tabLastAccessedMs(b) || 0;
   if (la !== lb) return lb - la;
   return (a.index ?? 0) - (b.index ?? 0);
 }
