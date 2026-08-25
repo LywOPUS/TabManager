@@ -13,7 +13,6 @@ import { openManagement } from '@/lib/openManagement'
 import {
   applyEnhancement,
   browserModelLibraryRequired,
-  classifyModeLabel,
   classifyOptsFromSettings,
   closeOpenTabDuplicates,
   closeTabsByIds,
@@ -33,7 +32,12 @@ import {
   relatedWindowOkText,
   relatedWindowPrompt,
   runPopupOrganize,
+  type OrganizeJobName,
+  type OrganizeJobResult,
   summarizeHighlightedTabs,
+  type ClassifyPreview,
+  type ClosableTab,
+  type OpenDupeGroup,
   seedOrganizeOkText,
   topicOrganizeOkText,
   proposeEnhancement,
@@ -63,20 +67,7 @@ import {
   PopupShell,
 } from './PopupShell'
 import { PullToStash } from './PullToStash'
-import { stashFailText, stashResultText } from '@/lib/stashResultText'
-
-type OpenDupe = {
-  key: string
-  keep: { title: string; active?: boolean }
-  items: Array<{ title: string }>
-}
-
-type CloseRow = {
-  tabId: number
-  title: string
-  url: string
-  reasons: string[]
-}
+import { parseStashResult, stashFailText, stashResultText } from '@/lib/stashResultText'
 
 type Panel =
   | { kind: 'idle' }
@@ -88,10 +79,10 @@ type Panel =
       sessionId: string
       source?: string
       name: string
-      preview: { groups: Array<{ name: string; tabs: Array<{ title: string }>; tabIds: string[] }> }
+      preview: ClassifyPreview
     }
-  | { kind: 'dedup'; groups: OpenDupe[]; removing: boolean }
-  | { kind: 'close'; rows: CloseRow[]; kept: number; source: string; checked: Set<number>; closing: boolean }
+  | { kind: 'dedup'; groups: OpenDupeGroup[]; removing: boolean }
+  | { kind: 'close'; rows: ClosableTab[]; kept: number; source: string; checked: Set<number>; closing: boolean }
   | { kind: 'topic'; query: string }
   | { kind: 'confirm'; action: 'related' | 'merge' | 'ungroup'; title: string; detail: string }
 
@@ -104,7 +95,6 @@ export function PopupApp() {
   const [mergeStats, setMergeStats] = useState({ otherWindows: 0, movableTabs: 0 })
   const [selectedCount, setSelectedCount] = useState(0)
   const [moreOrganize, setMoreOrganize] = useState(false)
-  const [classifyMode, setClassifyMode] = useState('browser')
   const [needModelLibrary, setNeedModelLibrary] = useState(false)
 
   const loadLiveStats = useCallback(async () => {
@@ -115,7 +105,7 @@ export function PopupApp() {
       summarizeHighlightedTabs(),
     ])
     setGroupStats(groups)
-    setDupeCloseCount((dupes as OpenDupe[]).reduce((n, g) => n + g.items.length, 0))
+    setDupeCloseCount(dupes.reduce((n, g) => n + g.items.length, 0))
     setMergeStats({
       otherWindows: merge?.otherWindows ?? 0,
       movableTabs: merge?.movableTabs ?? 0,
@@ -125,7 +115,6 @@ export function PopupApp() {
 
   const refreshModelGate = useCallback(async () => {
     const s = await getSettings()
-    setClassifyMode(s.classifyMode)
     setNeedModelLibrary(await browserModelLibraryRequired(s))
     return s
   }, [])
@@ -143,10 +132,10 @@ export function PopupApp() {
   }
 
   async function callOrganize(
-    op: 'window' | 'selected' | 'around' | 'topic' | 'related-summary' | 'related' | 'merge',
+    op: OrganizeJobName,
     payload: { query?: string } = {},
     busyText: string,
-  ) {
+  ): Promise<OrganizeJobResult> {
     setBusy(true)
     setMsg(busyText)
     try {
@@ -168,7 +157,7 @@ export function PopupApp() {
         picker: p,
         sessionId,
         name: '',
-        preview: { groups: [] },
+        preview: { groups: [], ungrouped: [] },
       })
       return
     }
@@ -197,7 +186,7 @@ export function PopupApp() {
       sessionId,
       source,
       name,
-      preview: { groups: preview.groups },
+      preview,
     })
   }
 
@@ -222,11 +211,13 @@ export function PopupApp() {
     try {
       const s = await getSettings()
       const reviewInTab = !keepActive && s.stashReview !== false
-      const r = await chrome.runtime.sendMessage({
-        type: 'STASH_CURRENT_WINDOW',
-        keepActive,
-        reviewInTab,
-      })
+      const r = parseStashResult(
+        await chrome.runtime.sendMessage({
+          type: 'STASH_CURRENT_WINDOW',
+          keepActive,
+          reviewInTab,
+        }),
+      )
       if (!r.ok) {
         setMsg(stashFailText(r))
         return false
@@ -283,13 +274,13 @@ export function PopupApp() {
 
   async function onRelatedToNewWindow() {
     const summary = await callOrganize('related-summary', {}, '判断相关标签…')
-    if (summary?.reason === 'classify_failed') {
-      setMsg(organizeFailText('classify_failed', summary.error))
+    if (!summary.ok) {
+      setMsg(organizeFailText(summary.reason, summary.error))
       return
     }
-    const count = summary?.count ?? 0
-    if (!summary?.ok || count < 2) {
-      setMsg(organizeFailText(summary?.reason || 'no_seed_match'))
+    const count = summary.count ?? 0
+    if (count < 2) {
+      setMsg(organizeFailText('no_seed_match'))
       return
     }
     setMsg('')
@@ -374,7 +365,7 @@ export function PopupApp() {
   async function openDedup() {
     setBusy(true)
     try {
-      const groups = (await findOpenTabDuplicates()) as OpenDupe[]
+      const groups = await findOpenTabDuplicates()
       if (!groups.length) {
         setDupeCloseCount(0)
         setMsg('全部窗口中没有重复网页')
@@ -406,7 +397,7 @@ export function PopupApp() {
         setMsg('没有可考虑关闭的标签')
         return
       }
-      const suggested = (rows as CloseRow[]).filter((r) => r.reasons.length > 0)
+      const suggested = rows.filter((r) => r.reasons.length > 0)
       if (!suggested.length) {
         setMsg('没有建议关闭的标签')
         return
@@ -888,7 +879,7 @@ export function PopupApp() {
               </button>
             ) : (
               <span className="truncate text-[10.5px] leading-none text-[#a1a1a4]" title="分类模型在管理页更改">
-                {classifyModeLabel(classifyMode)}
+                浏览器内小模型
               </span>
             )}
           </div>

@@ -3,17 +3,11 @@ import {
   BROWSER_MODELS,
   getBrowserModelWarmState,
   listBrowserModelCache,
+  type TabManagerSettings,
 } from '@/lib/chrome-ext'
 import { cn } from '@/lib/utils'
 
-export type ClassifySettings = {
-  /** 固定 'browser'：分类引擎只有浏览器内小模型 */
-  classifyMode: string
-  browserModelId: string
-  preferWebGPU: boolean
-  /** 收纳后弹确认；false = 静默自动整理 */
-  stashReview?: boolean
-}
+export type ClassifySettings = TabManagerSettings
 
 export type ClassifySettingsPatch = Partial<ClassifySettings>
 
@@ -23,14 +17,6 @@ export function mergeClassifySettings(
   patch: ClassifySettingsPatch,
 ): ClassifySettings {
   return { ...picker, ...patch }
-}
-
-type BrowserModelMeta = { id: string; label: string; note?: string; bundled?: boolean }
-
-type CacheRow = {
-  id: string
-  state: 'bundled' | 'ready' | 'partial' | 'leftover' | 'empty'
-  hint?: string
 }
 
 type Props = {
@@ -46,7 +32,7 @@ type Props = {
  * 模型的下载/删除只在管理页「模型」。
  */
 export function ClassifyPicker({ value, onChange, className, onOpenLibrary }: Props) {
-  const meta = (BROWSER_MODELS as BrowserModelMeta[]).find((m) => m.id === value.browserModelId)
+  const meta = BROWSER_MODELS.find((m) => m.id === value.browserModelId)
   const [modelHint, setModelHint] = useState<string | null>(null)
   const [needLibrary, setNeedLibrary] = useState(false)
 
@@ -63,8 +49,8 @@ export function ClassifyPicker({ value, onChange, className, onOpenLibrary }: Pr
       return
     }
     void listBrowserModelCache()
-      .then((rows: unknown) => {
-        const row = (rows as CacheRow[]).find((r) => r.id === value.browserModelId)
+      .then((rows) => {
+        const row = rows.find((r) => r.id === value.browserModelId)
         if (row?.state === 'ready') {
           setModelHint(row.hint || '已下载 · 整理时加载')
           setNeedLibrary(false)
@@ -98,7 +84,7 @@ export function ClassifyPicker({ value, onChange, className, onOpenLibrary }: Pr
             value={value.browserModelId}
             onChange={(e) => onChange({ browserModelId: e.target.value })}
           >
-            {BROWSER_MODELS.map((m: BrowserModelMeta) => (
+            {BROWSER_MODELS.map((m) => (
               <option key={m.id} value={m.id} title={m.note}>
                 {m.label}
               </option>

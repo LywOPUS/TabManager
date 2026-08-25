@@ -10,7 +10,7 @@ function tabGroupNone() {
   return chrome.tabGroups?.TAB_GROUP_ID_NONE ?? TAB_GROUP_NONE;
 }
 
-function groupedOpenTabs(tabs) {
+function groupedOpenTabs(tabs: chrome.tabs.Tab[]) {
   const none = tabGroupNone();
   return (tabs || []).filter(
     (t) => typeof t.id === 'number' && typeof t.groupId === 'number' && t.groupId !== none,
@@ -21,9 +21,11 @@ function yieldUi(ms = 0) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function ungroupChunk(ids) {
+async function ungroupChunk(ids: number[]) {
+  if (!ids.length) return 0
+  const [head, ...rest] = ids
   try {
-    await chrome.tabs.ungroup(ids);
+    await chrome.tabs.ungroup([head, ...rest])
     return ids.length;
   } catch {
     let n = 0;
@@ -52,7 +54,7 @@ export async function summarizeOpenTabGroups() {
 /**
  * @returns {Promise<{ ok: boolean, tabCount: number, groupCount: number, windowCount: number }>}
  */
-export async function ungroupAllWindows(onProgress) {
+export async function ungroupAllWindows(onProgress?: (text: string) => void) {
   const grouped = groupedOpenTabs(await chrome.tabs.query({}));
   const groupCount = new Set(grouped.map((t) => t.groupId)).size;
   const windowCount = new Set(grouped.map((t) => t.windowId)).size;

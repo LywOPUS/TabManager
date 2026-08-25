@@ -6,14 +6,23 @@ import {
   nameTemplateGroup,
   pathOwner,
   siteLabel,
+  type LabelTab,
 } from './groupLabels.js';
-import { DEFAULT_BROWSER_MODEL, getBrowserModelMeta, getClusterParams, MINILM_CLUSTER } from './browserModels.js';
+import {
+  DEFAULT_BROWSER_MODEL,
+  getBrowserModelMeta,
+  getClusterParams,
+  MINILM_CLUSTER,
+  type BrowserModelMeta,
+  type ClusterParams,
+} from './browserModels.js';
 import {
   MODEL_NOT_DOWNLOADED,
   accumulateDownloadProgress,
   formatDownloadStatus,
   formatLoadStatus,
   installCacheOnlyFetch,
+  installStreamableCacheMatch,
   cachedModelHost,
   isBrowserModelCacheReady,
   listCachedDtypes,
@@ -21,23 +30,119 @@ import {
 } from './browserModelCache.js';
 import { ensureModelHostPermission, pickModelRemoteHost } from './browserModelHost.js';
 import { canUseOffscreen, inPopupPage, inServiceWorker, offscreenRpc, shouldOffloadModel } from './offscreenRuntime.js';
+import { isRecord } from './unknown.js';
+
+type EmbedTab = LabelTab
+
+type EmbedGroup = {
+  key: string
+  name: string
+  tabIds: Array<string | number | undefined>
+  tabs: EmbedTab[]
+}
+
+type EmbedPreview = {
+  groups: EmbedGroup[]
+  ungrouped: EmbedTab[]
+}
+
+type EmbedStatusFn = (text: string, detail?: unknown) => void
+
+type DownloadFileProgress = { loaded: number; total: number; done: boolean }
+
+type ProgressEvent = {
+  status?: string
+  file?: string
+  name?: string
+  total?: number
+  loaded?: number
+  progress?: number
+}
+
+type ExtractorOpts = {
+  onStatus?: EmbedStatusFn
+  preferWebGPU?: boolean
+  allowDownload?: boolean
+}
+
+type PreloadOpts = {
+  preferWebGPU?: boolean
+  onStatus?: EmbedStatusFn
+}
+
+type ClassifyOpts = {
+  onStatus?: EmbedStatusFn
+  modelId?: string
+  preferWebGPU?: boolean
+  allowDownload?: boolean
+}
+
+type TransformersEnvOpts = {
+  modelPath?: string
+  wasmPaths?: string
+  allowRemote?: boolean
+  remoteHost?: string
+}
+
+type OnnxBackend = {
+  wasm?: { wasmPaths?: string }
+}
+
+type TransformersEnv = {
+  allowLocalModels?: boolean
+  localModelPath?: string
+  allowRemoteModels?: boolean
+  useBrowserCache?: boolean
+  remoteHost?: string
+  backends?: { onnx?: OnnxBackend }
+}
+
+type FeatureExtractor = (
+  texts: string | string[],
+  opts?: { pooling?: string; normalize?: boolean },
+) => Promise<{ tolist: () => number[][] }>
+
+type AgglomCluster = { members: EmbedTab[]; vecs: ArrayLike<number>[] }
+
+type TransformersModule = {
+  pipeline: (
+    task: string,
+    model: string,
+    opts?: {
+      device?: string
+      dtype?: string
+      progress_callback?: (p: ProgressEvent) => void
+    },
+  ) => Promise<FeatureExtractor>
+  env: TransformersEnv
+}
 
 // ponytail: WebGPU 优先（fp16），失败回退 WASM q8
-let extractorPromise = null;
-let loadedKey = null;
+let extractorPromise: Promise<FeatureExtractor> | null = null;
+let loadedKey: string | null = null;
 let lastDevice = 'wasm';
 
 // WebGPU 失败记忆：fp16 + q8 双下载只允许发生一次，之后（含跨会话）直接走 WASM。
 // 7 天 TTL 自动重试，防止驱动/浏览器升级后永远用不了 WebGPU。
 const WEBGPU_DEAD_KEY = 'webgpuDeadUntil';
 const WEBGPU_DEAD_TTL = 7 * 24 * 3600 * 1000;
-const webgpuDeadSession = new Set();
+const webgpuDeadSession = new Set<string>();
 
-async function isWebgpuDead(id) {
+function parseDeadUntilMap(value: unknown): Record<string, number> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    if (Number.isFinite(n) && n > 0) out[key] = n;
+  }
+  return out;
+}
+
+async function isWebgpuDead(id: string) {
   if (webgpuDeadSession.has(id)) return true;
   try {
     const o = await chrome.storage.local.get(WEBGPU_DEAD_KEY);
-    const until = o?.[WEBGPU_DEAD_KEY]?.[id] || 0;
+    const until = parseDeadUntilMap(o[WEBGPU_DEAD_KEY])[id] || 0;
     if (until > Date.now()) {
       webgpuDeadSession.add(id);
       return true;
@@ -48,11 +153,11 @@ async function isWebgpuDead(id) {
   return false;
 }
 
-async function markWebgpuDead(id) {
+async function markWebgpuDead(id: string) {
   webgpuDeadSession.add(id);
   try {
     const o = await chrome.storage.local.get(WEBGPU_DEAD_KEY);
-    const m = o?.[WEBGPU_DEAD_KEY] || {};
+    const m = parseDeadUntilMap(o[WEBGPU_DEAD_KEY]);
     m[id] = Date.now() + WEBGPU_DEAD_TTL;
     await chrome.storage.local.set({ [WEBGPU_DEAD_KEY]: m });
   } catch {
@@ -73,27 +178,33 @@ export function unloadBrowserModel() {
   }
 }
 
-function createProgressTracker(onStatus, { allowDownload = false } = {}) {
-  const files = new Map();
-  return (p) => {
+function createProgressTracker(onStatus: EmbedStatusFn | undefined) {
+  const files = new Map<string, DownloadFileProgress>();
+  return (p: ProgressEvent | null | undefined) => {
     if (!p || (p.status !== 'progress' && p.status !== 'done' && p.status !== 'download')) return;
-    // 整理只加载，不报「文件已齐 / 下载中」；模型库下载才走进度。
-    if (!allowDownload) return;
-    const sum = accumulateDownloadProgress(files, p);
-    onStatus?.(sum.complete ? formatLoadStatus(sum) : formatDownloadStatus(sum), {
-      phase: sum.complete ? 'loading' : 'download',
-      pct: sum.pct,
-      loaded: sum.loaded,
-      total: sum.total,
-      filesDone: sum.done,
-      filesTotal: sum.count,
-      file: sum.file,
-    });
+    try {
+      const sum = accumulateDownloadProgress(files, p);
+      onStatus?.(sum.complete ? formatLoadStatus(sum) : formatDownloadStatus(sum), {
+        phase: sum.complete ? 'loading' : 'download',
+        pct: sum.pct,
+        loaded: sum.loaded,
+        total: sum.total,
+        filesDone: sum.done,
+        filesTotal: sum.count,
+        file: sum.file,
+      });
+    } catch {
+      /* 进度进 transformers，抛出会中断读文件 */
+    }
   };
 }
 
+function pipelineProgress(allowDownload: boolean, onStatus?: EmbedStatusFn) {
+  return allowDownload ? { progress_callback: createProgressTracker(onStatus) } : {}
+}
+
 /** UI 用：当前页是否已有可用的 extractor（内存热缓存） */
-export function getBrowserModelWarmState(modelId, preferWebGPU = true) {
+export function getBrowserModelWarmState(modelId?: string, preferWebGPU = true) {
   const id = modelId || DEFAULT_BROWSER_MODEL;
   const key = `${id}|gpu:${preferWebGPU ? 1 : 0}`;
   return {
@@ -110,12 +221,14 @@ export function getBrowserModelWarmState(modelId, preferWebGPU = true) {
  * `env.backends.onnx = ort.env`（会覆盖事先写入的对象），
  * 因此 wasmPaths 用 setter 注入，确保落到真正的 ort env 上。
  */
-export function configureTransformersEnv(env, {
-  modelPath,
-  wasmPaths,
-  allowRemote = true,
-  remoteHost,
-} = {}) {
+export function configureTransformersEnv(env: TransformersEnv, opts: TransformersEnvOpts = {}) {
+  installStreamableCacheMatch();
+  const {
+    modelPath,
+    wasmPaths,
+    allowRemote = true,
+    remoteHost,
+  } = opts;
   env.allowLocalModels = !!modelPath;
   if (modelPath) env.localModelPath = modelPath;
   env.allowRemoteModels = allowRemote;
@@ -133,7 +246,7 @@ export function configureTransformersEnv(env, {
     configurable: true,
     enumerable: true,
     get: () => onnxEnv,
-    set: (v) => {
+    set: (v: OnnxBackend) => {
       onnxEnv = v;
       try {
         if (onnxEnv?.wasm) onnxEnv.wasm.wasmPaths = wasmPaths;
@@ -154,7 +267,8 @@ export async function probeWebGPU() {
   }
 }
 
-async function getExtractor(modelId, { onStatus, preferWebGPU = true, allowDownload = false } = {}) {
+async function getExtractor(modelId: string | undefined, opts: ExtractorOpts = {}) {
+  const { onStatus, preferWebGPU = true, allowDownload = false } = opts;
   const id = modelId || DEFAULT_BROWSER_MODEL;
   const key = `${id}|gpu:${preferWebGPU ? 1 : 0}`;
   if (extractorPromise && loadedKey === key) return extractorPromise;
@@ -174,7 +288,8 @@ async function getExtractor(modelId, { onStatus, preferWebGPU = true, allowDownl
   return extractorPromise;
 }
 
-async function loadExtractor(id, { onStatus, preferWebGPU, allowDownload = false } = {}) {
+async function loadExtractor(id: string, opts: ExtractorOpts = {}) {
+    const { onStatus, preferWebGPU, allowDownload = false } = opts;
     if (inServiceWorker()) {
       throw new Error('Service Worker 不能加载模型');
     }
@@ -184,11 +299,11 @@ async function loadExtractor(id, { onStatus, preferWebGPU, allowDownload = false
       if (!ready) throw new Error(MODEL_NOT_DOWNLOADED);
     }
 
-    const mod = await import(
+    const mod: TransformersModule = await import(
       chrome.runtime.getURL('vendor/transformers/transformers.web.min.js')
     );
     const { pipeline, env } = mod;
-    let remoteHost;
+    let remoteHost: string | undefined;
     if (!meta.bundled) {
       remoteHost = await cachedModelHost(id);
       if (allowDownload && !remoteHost) {
@@ -208,15 +323,14 @@ async function loadExtractor(id, { onStatus, preferWebGPU, allowDownload = false
       allowRemote: !meta.bundled,
       remoteHost,
     });
-
-    const onProgress = createProgressTracker(onStatus, { allowDownload });
+    const progress = pipelineProgress(allowDownload, onStatus);
     const restoreFetch = !meta.bundled && !allowDownload ? installCacheOnlyFetch() : () => {};
 
     try {
       // 内置：扩展包 q8，不走远程。
       // 远程模型：已有完整 fp16 且 GPU 可用才上 WebGPU；否则只下/用 q8。
       if (!meta.bundled) {
-        const dtypes = await listCachedDtypes(id);
+        const dtypes: string[] = await listCachedDtypes(id);
         const wantGpu = preferWebGPU && !(await isWebgpuDead(id)) && (await probeWebGPU());
         const ready = await isBrowserModelCacheReady(id);
         if (wantGpu && dtypes.includes('fp16') && ready) {
@@ -225,7 +339,7 @@ async function loadExtractor(id, { onStatus, preferWebGPU, allowDownload = false
             const pipe = await pipeline('feature-extraction', id, {
               device: 'webgpu',
               dtype: 'fp16',
-              progress_callback: onProgress,
+              ...progress,
             });
             lastDevice = 'webgpu';
             return pipe;
@@ -249,7 +363,7 @@ async function loadExtractor(id, { onStatus, preferWebGPU, allowDownload = false
       );
       const pipe = await pipeline('feature-extraction', id, {
         dtype: 'q8',
-        progress_callback: onProgress,
+        ...progress,
       });
       lastDevice = 'wasm';
       return pipe;
@@ -258,7 +372,7 @@ async function loadExtractor(id, { onStatus, preferWebGPU, allowDownload = false
     }
 }
 
-function cosine(a, b) {
+function cosine(a: ArrayLike<number>, b: ArrayLike<number>) {
   let dot = 0;
   let na = 0;
   let nb = 0;
@@ -271,15 +385,15 @@ function cosine(a, b) {
   return d ? dot / d : 0;
 }
 
-const PATH_SKIP = new Set([
+const PATH_SKIP = new Set<string>([
   'watch', 'status', 'p', 'reel', 'reels', 'shorts', 'video', 't', 'i',
   'home', 'explore', 'search', 'login', 'signup', 'share', 'intent',
 ]);
 
-function usefulPathWords(url) {
+function usefulPathWords(url: string | undefined) {
   try {
-    const parts = new URL(url).pathname.split('/').filter(Boolean);
-    const out = [];
+    const parts = new URL(String(url || '')).pathname.split('/').filter(Boolean);
+    const out: string[] = [];
     for (const raw of parts) {
       let s = raw;
       try {
@@ -301,22 +415,22 @@ function usefulPathWords(url) {
   }
 }
 
-function isUrlTitle(title) {
+function isUrlTitle(title: string | undefined) {
   const s = String(title || '').trim();
   return /^https?:\/\//i.test(s);
 }
 
-function titleForEmbed(item) {
+function titleForEmbed(item: EmbedTab | null | undefined) {
   const t = String(item?.title || '').trim();
   if (!t || isUrlTitle(t)) return '';
   return t.slice(0, 120);
 }
 
-function embedText(item, prefix = '', prefixMinBody = 0) {
+function embedText(item: EmbedTab | null | undefined, prefix = '', prefixMinBody = 0) {
   // 不把域名/协议写进文本，否则未加载页会聚成「Http」。
   // handle / 有意义的路径段（/docs/react）才带主题。
   const owner = pathOwner(item);
-  const pathWords = usefulPathWords(item.url);
+  const pathWords = usefulPathWords(item?.url);
   const title = titleForEmbed(item);
   const body = `${title} ${owner} ${pathWords}`.trim() || 'tab';
   if (!prefix || (prefixMinBody > 0 && body.length < prefixMinBody)) return body;
@@ -327,14 +441,14 @@ function embedText(item, prefix = '', prefixMinBody = 0) {
 // 主题命名：区分度关键词（簇内高频 × 全局低频），域名占绝对多数时才是站点组
 // ---------------------------------------------------------------------------
 
-const CJK_STOP = new Set([
+const CJK_STOP = new Set<string>([
   '的', '了', '在', '是', '和', '与', '及', '或',
   '一个', '使用', '怎么', '如何', '什么', '官网', '官方', '首页',
   '登录', '注册', '页面', '标签', '浏览器', '最新', '大全', '教程',
 ]);
 
-function tokenize(text) {
-  const tokens = [];
+function tokenize(text: string | undefined) {
+  const tokens: string[] = [];
   for (const m of String(text || '').matchAll(/[A-Za-z][A-Za-z0-9+#._-]{1,20}/g)) {
     tokens.push(m[0].toLowerCase());
   }
@@ -345,27 +459,27 @@ function tokenize(text) {
   return tokens.filter((t) => !CJK_STOP.has(t) && !isJunkGroupName(t));
 }
 
-function docFreq(itemTokensList) {
-  const df = new Map();
+function docFreq(itemTokensList: Iterable<Iterable<string>>) {
+  const df = new Map<string, number>();
   for (const set of itemTokensList) {
     for (const t of set) df.set(t, (df.get(t) || 0) + 1);
   }
   return df;
 }
 
-function stripTitleDecor(t) {
+function stripTitleDecor(t: string | undefined) {
   let s = String(t || '').trim();
   s = s.replace(/^\(\d+\)\s*/, '');
   s = s.replace(/\s+[-|—–·:：/][^-|—–·:：/]{1,30}$/, '').trim();
   return s;
 }
 
-function cleanTitle(t) {
+function cleanTitle(t: string | undefined) {
   return stripTitleDecor(t).slice(0, 24) || '分组';
 }
 
 /** 标题残词：不能当组名（How Kingdom Was Made → 不要叫 Was） */
-const WEAK_NAME = new Set([
+const WEAK_NAME = new Set<string>([
   ...CJK_STOP,
   'was', 'how', 'best', 'why', 'what', 'when', 'your', 'own', 'made', 'make',
   'hours', 'hour', 'video', 'watch', 'youtube', 'this', 'that', 'with', 'from',
@@ -375,7 +489,7 @@ const WEAK_NAME = new Set([
   'http', 'https', 'www', 'com', 'org', 'net', 'html', 'htm',
 ]);
 
-function isWeakNameToken(tok) {
+function isWeakNameToken(tok: string | undefined) {
   const s = String(tok || '').trim();
   if (!s || isJunkGroupName(s) || WEAK_NAME.has(s.toLowerCase())) return true;
   if (/^[a-z]{1,3}$/i.test(s)) return true;
@@ -383,7 +497,7 @@ function isWeakNameToken(tok) {
   return false;
 }
 
-function isShellTab(item) {
+function isShellTab(item: EmbedTab | null | undefined) {
   const title = String(item?.title || '').trim();
   const usable = title && !isUrlTitle(title);
   if (usable) {
@@ -394,22 +508,27 @@ function isShellTab(item) {
     return false;
   }
   // 标题空或就是网址：没有作者/路径主题就不要进聚类，避免堆成 Http
-  return !pathOwner(item) && !usefulPathWords(item.url);
+  return !pathOwner(item) && !usefulPathWords(item?.url);
 }
 
-function nameCluster(members, globalDf, totalItems, centralTitle) {
+function nameCluster(
+  members: EmbedTab[],
+  globalDf: Map<string, number>,
+  totalItems: number,
+  centralTitle: string | undefined,
+) {
   const site = majoritySite(members);
   if (site && isTemplateSite(site)) {
     const named = nameTemplateGroup(site, members, '');
     if (named && named !== siteLabel(site) && !isJunkGroupName(named)) return named;
   }
 
-  const local = new Map();
+  const local = new Map<string, number>();
   for (const m of members) {
-    const toks = new Set(tokenize(stripTitleDecor(m.title)));
+    const toks = new Set<string>(tokenize(stripTitleDecor(m.title)));
     for (const t of toks) local.set(t, (local.get(t) || 0) + 1);
   }
-  let best = null;
+  let best: string | null = null;
   let bestScore = 0;
   for (const [tok, ln] of local) {
     if (ln < 2 || isWeakNameToken(tok)) continue;
@@ -446,29 +565,34 @@ function nameCluster(members, globalDf, totalItems, centralTitle) {
 
 const EMBED_BATCH = 16;
 
-function quantile(sorted, q) {
+function quantile(sorted: number[], q: number) {
   if (!sorted.length) return 0;
-  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+  const i = Math.min(sorted.length - 1, Math.floor(q * sorted.length));
+  return sorted[i] ?? 0;
 }
 
 /** 预计算桶内 n×n 相似度矩阵（含模长归一化，与 cosine 等价）。O(n²·dim) 一次算清 */
-function buildSimMatrix(vecs) {
+function buildSimMatrix(vecs: ArrayLike<number>[]) {
   const n = vecs.length;
   const m = new Float32Array(n * n);
   const norms = new Float32Array(n);
   for (let i = 0; i < n; i += 1) {
     let s = 0;
-    for (let k = 0; k < vecs[i].length; k += 1) s += vecs[i][k] * vecs[i][k];
+    const vi = vecs[i];
+    if (!vi) continue;
+    for (let k = 0; k < vi.length; k += 1) s += vi[k] * vi[k];
     norms[i] = Math.sqrt(s) || 1;
   }
   for (let i = 0; i < n; i += 1) {
     m[i * n + i] = 1;
     const vi = vecs[i];
+    if (!vi) continue;
     for (let j = i + 1; j < n; j += 1) {
       const vj = vecs[j];
+      if (!vj) continue;
       let dot = 0;
       for (let k = 0; k < vi.length; k += 1) dot += vi[k] * vj[k];
-      const sim = dot / (norms[i] * norms[j]);
+      const sim = dot / ((norms[i] || 1) * (norms[j] || 1));
       m[i * n + j] = sim;
       m[j * n + i] = sim;
     }
@@ -482,9 +606,9 @@ function buildSimMatrix(vecs) {
  * 每轮合并 O(n²) 纯数组扫描，总 O(n³) 但常数极小；矩阵内存 O(n²)。
  * 旧实现每轮全量重算向量叉乘，400 标签大桶约 1e10 次乘法，UI 冻结数十秒。
  */
-function agglomerative(items, vectors, simMatrix, threshold) {
+function agglomerative(items: EmbedTab[], vectors: ArrayLike<number>[], simMatrix: ArrayLike<number>, threshold: number) {
   const n = items.length;
-  const clusters = items.map((it, i) => ({ members: [it], vecs: [vectors[i]] }));
+  const clusters: Array<AgglomCluster | null> = items.map((it, i) => ({ members: [it], vecs: [vectors[i] || []] }));
   // sum[c1*n+c2] = 簇 c1 与簇 c2 的成员相似度之和（初始为单例相似度）
   const sum = Float32Array.from(simMatrix);
   for (;;) {
@@ -492,11 +616,13 @@ function agglomerative(items, vectors, simMatrix, threshold) {
     let bi = -1;
     let bj = -1;
     for (let i = 0; i < n; i += 1) {
-      if (!clusters[i]) continue;
-      const si = clusters[i].members.length;
+      const ci = clusters[i];
+      if (!ci) continue;
+      const si = ci.members.length;
       for (let j = i + 1; j < n; j += 1) {
-        if (!clusters[j]) continue;
-        const avg = sum[i * n + j] / (si * clusters[j].members.length);
+        const cj = clusters[j];
+        if (!cj) continue;
+        const avg = sum[i * n + j] / (si * cj.members.length);
         if (avg > best) {
           best = avg;
           bi = i;
@@ -505,28 +631,35 @@ function agglomerative(items, vectors, simMatrix, threshold) {
       }
     }
     if (bi < 0) break;
+    const merged = clusters[bi];
+    const dropped = clusters[bj];
+    if (!merged || !dropped) break;
     for (let k = 0; k < n; k += 1) {
       if (k === bi || k === bj || !clusters[k]) continue;
       sum[bi * n + k] += sum[bj * n + k];
       sum[k * n + bi] = sum[bi * n + k];
     }
-    clusters[bi].members.push(...clusters[bj].members);
-    clusters[bi].vecs.push(...clusters[bj].vecs);
+    merged.members.push(...dropped.members);
+    merged.vecs.push(...dropped.vecs);
     clusters[bj] = null;
   }
-  return clusters.filter(Boolean);
+  return clusters.filter((c): c is AgglomCluster => c != null);
 }
 
 /** 簇中心成员（命名兜底用） */
-function centralMember(cluster) {
+function centralMember(cluster: AgglomCluster) {
   // 平均向量当质心
-  const dim = cluster.vecs[0].length;
+  const firstVec = cluster.vecs[0];
+  if (!firstVec) return cluster.members[0];
+  const dim = firstVec.length;
   const centroid = new Float32Array(dim);
   for (const v of cluster.vecs) for (let k = 0; k < dim; k += 1) centroid[k] += v[k] / cluster.vecs.length;
   let central = cluster.members[0];
   let bestSim = -1;
   for (let i = 0; i < cluster.members.length; i += 1) {
-    const sim = cosine(cluster.vecs[i], centroid);
+    const vec = cluster.vecs[i];
+    if (!vec) continue;
+    const sim = cosine(vec, centroid);
     if (sim > bestSim) {
       bestSim = sim;
       central = cluster.members[i];
@@ -535,7 +668,7 @@ function centralMember(cluster) {
   return central;
 }
 
-function pushGroup(groups, usedNames, name, members) {
+function pushGroup(groups: EmbedGroup[], usedNames: Set<string>, name: string, members: EmbedTab[]) {
   let finalName = name;
   for (let i = 2; usedNames.has(finalName); i += 1) finalName = `${name} · ${i}`;
   usedNames.add(finalName);
@@ -547,19 +680,29 @@ function pushGroup(groups, usedNames, name, members) {
   });
 }
 
+function clusterParamsOf(cluster: ClusterParams): ClusterParams {
+  const meta: BrowserModelMeta = {
+    id: DEFAULT_BROWSER_MODEL,
+    label: '',
+    note: '',
+    cluster,
+  };
+  return getClusterParams(meta);
+}
+
 /** 已有向量时的全局聚类（单测 / 调试） */
-export function clusterPreview(items, vectors, cluster = MINILM_CLUSTER) {
-  const groups = [];
-  const ungrouped = [];
-  const usedNames = new Set();
+export function clusterPreview(items: EmbedTab[], vectors: ArrayLike<number>[], cluster: ClusterParams = MINILM_CLUSTER): EmbedPreview {
+  const groups: EmbedGroup[] = [];
+  const ungrouped: EmbedTab[] = [];
+  const usedNames = new Set<string>();
   if (!items.length) return { groups, ungrouped };
-  const { floor, q, cap } = getClusterParams({ cluster });
+  const { floor, q, cap } = clusterParamsOf(cluster);
   const globalDf = docFreq(items.map((t) => new Set(tokenize(stripTitleDecor(t.title)))));
   const simMatrix = buildSimMatrix(vectors);
-  const sims = [];
+  const sims: number[] = [];
   const n = items.length;
   for (let i = 0; i < n; i += 1) {
-    for (let j = i + 1; j < n; j += 1) sims.push(simMatrix[i * n + j]);
+    for (let j = i + 1; j < n; j += 1) sims.push(simMatrix[i * n + j] ?? 0);
   }
   sims.sort((a, b) => a - b);
   const threshold = Math.max(floor, Math.min(cap, quantile(sims, q)));
@@ -576,43 +719,99 @@ export function clusterPreview(items, vectors, cluster = MINILM_CLUSTER) {
   return { groups, ungrouped };
 }
 
-export async function preloadBrowserModel(modelId, { preferWebGPU = true, onStatus } = {}) {
+export async function preloadBrowserModel(modelId?: string, opts: PreloadOpts = {}) {
+  const { preferWebGPU = true, onStatus } = opts;
   if (inPopupPage()) throw new Error(MODEL_NOT_DOWNLOADED);
-  const meta = getBrowserModelMeta(modelId);
+  const id = typeof modelId === 'string' ? modelId : undefined;
+  const meta = getBrowserModelMeta(id || DEFAULT_BROWSER_MODEL);
   if (shouldOffloadModel(meta)) {
     try {
-      await offscreenRpc('preload', { modelId, opts: { preferWebGPU } }, onStatus);
+      await offscreenRpc('preload', { modelId: id, opts: { preferWebGPU } }, onStatus);
       return true;
     } catch (e) {
       if (inServiceWorker()) throw e;
-      const raw = String(e?.message || e);
+      const raw = e instanceof Error ? e.message : String(e);
       if (!/无法启动|未就绪|Receiving end|offscreen/i.test(raw)) throw e;
       console.warn('offscreen preload fallback', e);
     }
   }
-  await getExtractor(modelId, { onStatus, preferWebGPU, allowDownload: true });
+  await getExtractor(id, { onStatus, preferWebGPU, allowDownload: true });
   try {
-    await purgeLeftoverModelCache(modelId);
+    await purgeLeftoverModelCache(id);
   } catch {
     /* 量化版已就绪，清残留失败不挡用 */
   }
   return true;
 }
 
-export async function classifyWithBrowserEmbed(items, { onStatus, modelId, preferWebGPU = true } = {}) {
-  if (!items?.length) return { groups: [], ungrouped: [] };
+function parseLabelTab(value: Record<string, unknown>): EmbedTab {
+  const tab: EmbedTab = {};
+  if (typeof value.id === 'string' || typeof value.id === 'number') tab.id = value.id;
+  if (typeof value.tabId === 'string' || typeof value.tabId === 'number') tab.tabId = value.tabId;
+  if (typeof value.title === 'string') tab.title = value.title;
+  if (typeof value.url === 'string') tab.url = value.url;
+  return tab;
+}
+
+function toEmbedTabs(items: unknown): EmbedTab[] {
+  if (!Array.isArray(items)) return [];
+  const out: EmbedTab[] = [];
+  for (const item of items) out.push(isRecord(item) ? parseLabelTab(item) : {});
+  return out;
+}
+
+function parseEmbedGroup(value: unknown): EmbedGroup | null {
+  if (!isRecord(value)) return null;
+  const name = typeof value.name === 'string' ? value.name : '';
+  const key = typeof value.key === 'string' ? value.key : name;
+  const tabs: EmbedTab[] = [];
+  if (Array.isArray(value.tabs)) {
+    for (const t of value.tabs) tabs.push(isRecord(t) ? parseLabelTab(t) : {});
+  }
+  const tabIds: Array<string | number | undefined> = [];
+  if (Array.isArray(value.tabIds)) {
+    for (const id of value.tabIds) {
+      if (typeof id === 'string' || typeof id === 'number' || id === undefined) tabIds.push(id);
+    }
+  } else {
+    for (const t of tabs) tabIds.push(t.id);
+  }
+  return { key, name, tabs, tabIds };
+}
+
+function parseEmbedPreview(value: unknown): EmbedPreview | null {
+  if (!isRecord(value)) return null;
+  if (!Array.isArray(value.groups) || !Array.isArray(value.ungrouped)) return null;
+  const groups: EmbedGroup[] = [];
+  for (const g of value.groups) {
+    const parsed = parseEmbedGroup(g);
+    if (parsed) groups.push(parsed);
+  }
+  const ungrouped: EmbedTab[] = [];
+  for (const t of value.ungrouped) ungrouped.push(isRecord(t) ? parseLabelTab(t) : {});
+  return { groups, ungrouped };
+}
+
+export async function classifyWithBrowserEmbed(items?: unknown, opts: ClassifyOpts = {}): Promise<EmbedPreview> {
+  const { onStatus, modelId, preferWebGPU = true } = opts;
+  const tabs = toEmbedTabs(items);
+  if (!tabs.length) return { groups: [], ungrouped: [] };
   const meta = getBrowserModelMeta(modelId || DEFAULT_BROWSER_MODEL);
   if (shouldOffloadModel(meta)) {
     const r = await offscreenRpc('classify', {
-      items,
+      items: tabs,
       opts: { modelId: meta.id, preferWebGPU, allowDownload: false },
     }, onStatus);
-    return r?.preview || { groups: [], ungrouped: items };
+    if (isRecord(r)) {
+      const preview = parseEmbedPreview(r.preview);
+      if (preview) return preview;
+    }
+    return { groups: [], ungrouped: tabs };
   }
 
-  const shells = [];
-  const work = [];
-  for (const t of items) {
+  const shells: EmbedTab[] = [];
+  const work: EmbedTab[] = [];
+  for (const t of tabs) {
     if (isShellTab(t)) shells.push(t);
     else work.push(t);
   }
@@ -624,7 +823,7 @@ export async function classifyWithBrowserEmbed(items, { onStatus, modelId, prefe
   const cluster = getClusterParams(meta);
   const prefix = meta.textPrefix || '';
   const texts = work.map((t) => embedText(t, prefix, cluster.prefixMinBody));
-  const vectors = [];
+  const vectors: Float32Array[] = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH) {
     const end = Math.min(i + EMBED_BATCH, texts.length);
     onStatus?.(`编码 ${i + 1}–${end}/${texts.length}（${meta.label} · ${lastDevice}）…`);

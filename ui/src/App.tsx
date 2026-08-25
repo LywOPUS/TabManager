@@ -18,7 +18,8 @@ import { timeAgo } from '@/lib/timeAgo'
 import { ToastProvider, useToast } from '@/hooks/useToast'
 import { JetBrainsAmbient } from '@/components/JetBrainsAmbient'
 import { cn } from '@/lib/utils'
-import { stashFailText, stashResultText } from '@/lib/stashResultText'
+import { parseStashResult, stashFailText, stashResultText } from '@/lib/stashResultText'
+import { errorMessage } from '@ext/lib/unknown.ts'
 import { collectSearchHits, highlightMatch, type TabHit } from '@/lib/searchHits'
 import {
   applyEnhancement,
@@ -34,6 +35,7 @@ import {
   isActionableUsageRow,
   processesApiAvailable,
   findOpenTabDuplicates,
+  DEFAULT_BROWSER_MODEL,
   defaultIdleMinutes,
   formatBytes,
   formatIdle,
@@ -55,7 +57,6 @@ import {
   dissolveOkText,
   dissolvePrompt,
   newId,
-  classifyModeLabel,
   classifyOptsFromSettings,
   proposeEnhancement,
   removeDuplicates,
@@ -67,23 +68,13 @@ import {
   tabCount,
   tabsForSuggest,
   updateSession,
+  type ClassifyPreview,
+  type OpenDupeGroup,
   type Session,
+  type StashDupeGroup,
+  type TabUsageResult,
+  type UsageRow,
 } from '@/lib/chrome-ext'
-
-type UsageRow = {
-  tabId: number
-  title: string
-  url: string
-  bytes: number | null
-  cpu: number | null
-  idleMs: number | null
-  discarded: boolean
-  active: boolean
-  audible: boolean
-  pinned: boolean
-  sharedProcess: boolean
-  suggestDiscard: boolean
-}
 
 /** 跨会话汇总的稍后阅读条目（附出来源会话，便于跳回） */
 type ReadLaterItem = {
@@ -105,7 +96,7 @@ type ModalState =
       picker: ClassifySettings
       /** 收纳后确认流程才有：建议的会话名（可编辑） */
       proposedName?: string
-      preview: { groups: Array<{ name: string; tabs: Array<{ title: string }>; tabIds: string[] }>; ungrouped: unknown[] } | null
+      preview: ClassifyPreview | null
       source?: string
     }
   | {
@@ -132,16 +123,8 @@ type ModalState =
   | {
       kind: 'dedup'
       removing: boolean
-      openGroups: Array<{
-        key: string
-        keep: { title: string; active?: boolean }
-        items: Array<{ title: string }>
-      }>
-      stashGroups: Array<{
-        key: string
-        keep: { title: string; sessionName: string }
-        items: Array<{ title: string; sessionName: string }>
-      }>
+      openGroups: OpenDupeGroup[]
+      stashGroups: StashDupeGroup[]
     }
   | {
       kind: 'usage'
@@ -191,7 +174,7 @@ function TextAction({
   )
 }
 
-function GroupPreviewList({ groups }: { groups: Array<{ name: string; action?: string; tabs: Array<{ title: string }> }> }) {
+function GroupPreviewList({ groups }: { groups: Array<{ name: string; action?: string; tabs: Array<{ title?: string }> }> }) {
   let row = 0
   const actionText = (action?: string) =>
     action === 'absorb' ? '并入已有'
@@ -497,8 +480,8 @@ function ManagementApp() {
 
   async function persistSettings(patch: Partial<ClassifySettings>) {
     const next = await setSettings(patch)
-    setSettingsState(next as ClassifySettings)
-    return next as ClassifySettings
+    setSettingsState(next)
+    return next
   }
 
   async function openLive() {
@@ -555,8 +538,9 @@ function ManagementApp() {
       } catch {
         setSettingsState({
           classifyMode: 'browser',
-          browserModelId: 'onnx-community/embeddinggemma-300m-ONNX',
+          browserModelId: DEFAULT_BROWSER_MODEL,
           preferWebGPU: true,
+          stashReview: true,
         })
       }
     })()
@@ -572,8 +556,9 @@ function ManagementApp() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return
-      const t = e.target as HTMLElement | null
-      if (t?.closest('input, textarea, select, [contenteditable="true"]')) return
+      const t = e.target
+      if (!(t instanceof HTMLElement)) return
+      if (t.closest('input, textarea, select, [contenteditable="true"]')) return
       if (!sessions.length || modal.kind !== 'none') return
       e.preventDefault()
       searchRef.current?.focus()
@@ -587,10 +572,12 @@ function ManagementApp() {
     setStashBusy(true)
     let sessionId: string | null = null
     try {
-      const r = await chrome.runtime.sendMessage({
-        type: 'STASH_CURRENT_WINDOW',
-        keepActive,
-      })
+      const r = parseStashResult(
+        await chrome.runtime.sendMessage({
+          type: 'STASH_CURRENT_WINDOW',
+          keepActive,
+        }),
+      )
       if (!r.ok) {
         toast(stashFailText(r))
         return
@@ -598,7 +585,7 @@ function ManagementApp() {
       toast(stashResultText(r))
       setExpanded(r.session.id)
       await reload()
-      sessionId = r.session.id as string
+      sessionId = r.session.id
     } finally {
       setStashBusy(false)
     }
@@ -635,38 +622,22 @@ function ManagementApp() {
 
   async function openDedup() {
     const [openGroups, data] = await Promise.all([findOpenTabDuplicates(), getData()])
-    const stashGroups = findDuplicates(data) as Array<{
-      key: string
-      keep: { title: string; sessionName: string }
-      items: Array<{ title: string; sessionName: string }>
-    }>
     setModal({
       kind: 'dedup',
-      openGroups: openGroups as Array<{
-        key: string
-        keep: { title: string; active?: boolean }
-        items: Array<{ title: string }>
-      }>,
-      stashGroups,
+      openGroups,
+      stashGroups: findDuplicates(data),
       removing: false,
     })
   }
 
-  function usageFromResult(r: {
-    source: string
-    error?: string
-    rows?: UsageRow[]
-    suggestedIds?: number[]
-  }): Extract<ModalState, { kind: 'usage' }> {
-    const suggestedIds = r.suggestedIds || []
+  function usageFromResult(r: TabUsageResult): Extract<ModalState, { kind: 'usage' }> {
     return {
       kind: 'usage',
       loading: false,
       source: r.source,
-      error: r.error,
-      rows: (r.rows || []) as UsageRow[],
-      suggestedIds,
-      selected: new Set(suggestedIds),
+      rows: r.rows,
+      suggestedIds: r.suggestedIds,
+      selected: new Set(r.suggestedIds),
     }
   }
 
@@ -687,7 +658,7 @@ function ManagementApp() {
         kind: 'usage',
         loading: false,
         source: 'idle',
-        error: String((e as Error)?.message || e),
+        error: errorMessage(e),
         rows: [],
         suggestedIds: [],
         selected: new Set(),
@@ -707,7 +678,7 @@ function ManagementApp() {
               kind: 'usage',
               loading: false,
               source: 'idle',
-              error: String((e as Error)?.message || e),
+              error: errorMessage(e),
               rows: [],
               suggestedIds: [],
               selected: new Set(),
@@ -729,8 +700,8 @@ function ManagementApp() {
     })
   }
 
-  function actionableSelectedIds() {
-    if (modal.kind !== 'usage') return [] as number[]
+  function actionableSelectedIds(): number[] {
+    if (modal.kind !== 'usage') return []
     const byId = new Map(modal.rows.map((r) => [r.tabId, r]))
     return [...modal.selected].filter((id) => isActionableUsageRow(byId.get(id)))
   }
@@ -955,7 +926,7 @@ function ManagementApp() {
     await runSuggest(sessionId, s, true)
   }
 
-  async function applySuggestedGroups(sessionId: string, preview: { groups: Array<{ name: string; tabIds: string[] }> }, name?: string) {
+  async function applySuggestedGroups(sessionId: string, preview: ClassifyPreview, name?: string) {
     await applyEnhancement(sessionId, { preview, name: name?.trim() || undefined })
   }
 
@@ -1195,7 +1166,7 @@ function ManagementApp() {
               variant={showClassify ? 'secondary' : 'ghost'}
               size="sm"
               aria-expanded={showClassify}
-              title={classifyModeLabel(settings.classifyMode)}
+              title="浏览器内小模型"
               onClick={() => {
                 setShowClassify((v) => !v)
                 setShowModels(false)
@@ -1203,7 +1174,7 @@ function ManagementApp() {
             >
               分类设置
               <span className="ml-1.5 font-normal text-muted-foreground">
-                {classifyModeLabel(settings.classifyMode)}
+                浏览器内小模型
               </span>
             </Button>
             <Button
@@ -1565,24 +1536,25 @@ function ManagementApp() {
               <Button
                 disabled={!modal.plan || modal.windowId == null || modal.busy}
                 onClick={() => {
-                  if (!modal.plan || modal.windowId == null) return
-                  const source = modal.source
+                  const windowId = modal.windowId
                   const plan = modal.plan
+                  if (!plan || windowId == null) return
+                  const source = modal.source
                   void (async () => {
                     await setSettings(modal.picker)
                     setModal((prev) => (prev.kind === 'live' ? { ...prev, busy: true, status: '正在整理标签组' } : prev))
                     try {
-                      const applied = await applyLivePlan(modal.windowId!, plan, (m: string) =>
+                      const applied = await applyLivePlan(windowId, plan, (m: string) =>
                         setModal((prev) => (prev.kind === 'live' ? { ...prev, status: m } : prev)),
                       )
                       setModal({ kind: 'none' })
-                      if (!applied?.ok) {
-                        if (applied?.reason === 'partial') {
+                      if (!applied.ok) {
+                        if (applied.reason === 'partial') {
                           toast(
-                            `部分完成：并入 ${applied.absorbTabs || 0} · 新建 ${applied.created || 0} · 失败 ${applied.failed?.length || 0}`,
+                            `部分完成：并入 ${applied.absorbTabs || 0} · 新建 ${applied.created || 0} · 失败 ${applied.failed.length}`,
                           )
                         } else {
-                          const detail = applied?.failed?.[0]?.error
+                          const detail = applied.failed[0]?.error
                           toast(detail ? `分组失败：${detail}` : '分组失败，已有标签组未改')
                         }
                         return
@@ -1591,10 +1563,10 @@ function ManagementApp() {
                     } catch (e) {
                       setModal((prev) =>
                         prev.kind === 'live'
-                          ? { ...prev, busy: false, status: String((e as Error)?.message || e) }
+                          ? { ...prev, busy: false, status: errorMessage(e) }
                           : prev,
                       )
-                      toast(`整理未完成：${String((e as Error)?.message || e)}`)
+                      toast(`整理未完成：${errorMessage(e)}`)
                     }
                   })()
                 }}
@@ -1655,7 +1627,7 @@ function ManagementApp() {
                       setModal({ kind: 'none' })
                       toast(`已合并并整理（${sourceLabel(r.source)}）`)
                     } catch (e) {
-                      toast(`已拆组但未完成：${String((e as Error)?.message || e)}`)
+                      toast(`已拆组但未完成：${errorMessage(e)}`)
                       setModal({ kind: 'none' })
                     }
                   })()

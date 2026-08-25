@@ -1,10 +1,26 @@
+export type ClusterParams = {
+  floor: number
+  q: number
+  cap: number
+  prefixMinBody: number
+}
+
+export type BrowserModelMeta = {
+  id: string
+  label: string
+  note: string
+  bundled?: boolean
+  textPrefix?: string
+  cluster: ClusterParams
+}
+
 /** MiniLM 句对相似度带：短英文标题常用 */
-export const MINILM_CLUSTER = { floor: 0.38, q: 0.55, cap: 0.62, prefixMinBody: 0 };
+export const MINILM_CLUSTER: ClusterParams = { floor: 0.38, q: 0.55, cap: 0.62, prefixMinBody: 0 }
 /** Gemma 余弦整体偏高，门槛抬高；短标题不加指令前缀，避免被 prefix 拉近 */
-export const GEMMA_CLUSTER = { floor: 0.52, q: 0.58, cap: 0.74, prefixMinBody: 24 };
+export const GEMMA_CLUSTER: ClusterParams = { floor: 0.52, q: 0.58, cap: 0.74, prefixMinBody: 24 }
 
 /** 浏览器内可用的句向量模型（transformers.js / ONNX） */
-export const BROWSER_MODELS = [
+export const BROWSER_MODELS: [BrowserModelMeta, ...BrowserModelMeta[]] = [
   {
     id: 'Xenova/all-MiniLM-L6-v2',
     label: '内置 · MiniLM-L6',
@@ -38,17 +54,17 @@ export const DEFAULT_BROWSER_MODEL = 'Xenova/all-MiniLM-L6-v2';
 export const GEMMA_BROWSER_MODEL = 'onnx-community/embeddinggemma-300m-ONNX';
 export const LEGACY_BROWSER_MODEL = DEFAULT_BROWSER_MODEL;
 
-export function getBrowserModelMeta(id) {
-  return BROWSER_MODELS.find((m) => m.id === id) || BROWSER_MODELS[0];
+export function getBrowserModelMeta(id: string): BrowserModelMeta {
+  return BROWSER_MODELS.find((m) => m.id === id) ?? BROWSER_MODELS[0]
 }
 
-export function getClusterParams(idOrMeta) {
-  const meta = typeof idOrMeta === 'string' ? getBrowserModelMeta(idOrMeta) : (idOrMeta || {});
-  const c = meta.cluster || MINILM_CLUSTER;
+export function getClusterParams(idOrMeta: string | BrowserModelMeta): ClusterParams {
+  const meta = typeof idOrMeta === 'string' ? getBrowserModelMeta(idOrMeta) : idOrMeta
+  const c = meta.cluster
   return {
     floor: c.floor ?? MINILM_CLUSTER.floor,
     q: c.q ?? MINILM_CLUSTER.q,
     cap: c.cap ?? MINILM_CLUSTER.cap,
     prefixMinBody: c.prefixMinBody ?? 0,
-  };
+  }
 }

@@ -9,7 +9,43 @@
  */
 import { registrableDomain } from './groupHeuristics.js';
 
-export const SITE_ALIASES = {
+export type LabelTab = {
+  id?: string | number
+  tabId?: string | number
+  title?: string
+  url?: string
+}
+
+export type LabelGroup = {
+  key: string
+  name: string
+  tabs: LabelTab[]
+  tabIds: Array<string | number | undefined>
+}
+
+export type LabelPreview = {
+  groups: LabelGroup[]
+  ungrouped: LabelTab[]
+}
+
+type LabelGroupInput = {
+  key?: string
+  name?: string
+  title?: string
+  tabs?: LabelTab[]
+  tabIds?: Array<string | number | undefined>
+}
+
+type LabelPreviewInput = {
+  groups?: LabelGroupInput[]
+  ungrouped?: LabelTab[]
+}
+
+type TabId = string | number | undefined
+type TopicRec = { tabs: Map<TabId, LabelTab>; sites: Set<string> }
+type OwnerBucket = { raw: string; tabs: LabelTab[] }
+
+export const SITE_ALIASES: Record<string, string> = {
   'twitter.com': 'x.com',
   't.co': 'x.com',
   'youtu.be': 'youtube.com',
@@ -17,11 +53,11 @@ export const SITE_ALIASES = {
 };
 
 /** 完整主机名 → 站点（在 eTLD+1 之前） */
-export const HOST_ALIASES = {
+export const HOST_ALIASES: Record<string, string> = {
   'chat.openai.com': 'chatgpt.com',
 };
 
-export const SITE_LABELS = {
+export const SITE_LABELS: Record<string, string> = {
   'x.com': 'X',
   'youtube.com': 'YouTube',
   'github.com': 'GitHub',
@@ -48,7 +84,7 @@ export const SITE_LABELS = {
 };
 
 /** 标题套话多：不要用「上的」「帖子」当组名；忙则按作者拆 */
-export const TEMPLATE_SITES = new Set([
+export const TEMPLATE_SITES = new Set<string>([
   'x.com',
   'weibo.com',
   'instagram.com',
@@ -57,7 +93,7 @@ export const TEMPLATE_SITES = new Set([
   'douyin.com',
 ]);
 
-const TEMPLATE_BRANDS = {
+const TEMPLATE_BRANDS: Record<string, string[]> = {
   'x.com': ['X', 'Twitter'],
   'weibo.com': ['微博', 'Weibo'],
   'instagram.com': ['Instagram'],
@@ -67,35 +103,35 @@ const TEMPLATE_BRANDS = {
 };
 
 /** 同站标签很多时按路径第一段拆开（GitHub owner、X handle 等） */
-const PATH_GROUP_SITES = {
-  'github.com': new Set([
+const PATH_GROUP_SITES: Record<string, Set<string>> = {
+  'github.com': new Set<string>([
     'settings', 'notifications', 'pulls', 'issues', 'marketplace', 'explore',
     'topics', 'orgs', 'users', 'login', 'signup', 'new', 'dashboard', 'search',
     'copilot', 'codespaces', 'sponsors', 'about', 'features', 'pricing',
     'security', 'enterprise', 'customer-stories', 'readme', 'discussions',
   ]),
-  'gitlab.com': new Set([
+  'gitlab.com': new Set<string>([
     'dashboard', 'explore', 'users', 'help', 'signin', 'signup', 'groups',
   ]),
-  'x.com': new Set([
+  'x.com': new Set<string>([
     'i', 'home', 'explore', 'search', 'notifications', 'messages', 'settings',
     'compose', 'intent', 'hashtag', 'share', 'login', 'signup', 'following',
     'followers', 'communities', 'premium', 'jobs', 'grok', 'articles', 'lists',
     'bookmarks', 'highlights', 'tos', 'privacy', 'about', 'help', 'download',
     'flow', 'account', 'oauth', 'embed', 'topics', 'happenings',
   ]),
-  'instagram.com': new Set([
+  'instagram.com': new Set<string>([
     'p', 'reel', 'reels', 'stories', 'explore', 'accounts', 'direct', 'about',
     'legal', 'developer', 'directory', 'tv', 'igtv', 'live', 'tags', 'locations',
   ]),
-  'tiktok.com': new Set([
+  'tiktok.com': new Set<string>([
     'foryou', 'following', 'search', 'live', 'discover', 'inbox', 'friends',
     'video', 'music', 'tag', 'place', 'login', 'signup', 'about', 'embed',
     'share', 'upload', 'messages', 't', 'v', 'explore',
   ]),
 };
 
-const JUNK_EXACT = new Set([
+const JUNK_EXACT = new Set<string>([
   '上的', '中的', '里的', '下的', '后的', '前的', '时的', '到的',
   '的帖', '帖子', '的推', '推文', '主页', '用户', '分享', '查看',
   'on', 'of', 'to', 'in', 'for', 'and', 'the', 'a', 'an',
@@ -103,7 +139,7 @@ const JUNK_EXACT = new Set([
 ]);
 
 /** 标题/路径里常见、不能当主题名的词 */
-const GENERIC_TOKENS = new Set([
+const GENERIC_TOKENS = new Set<string>([
   ...JUNK_EXACT,
   'intro', 'guide', 'tutorial', 'docs', 'documentation', 'official',
   'home', 'blog', 'learn', 'getting', 'started', 'overview', 'index',
@@ -114,30 +150,30 @@ const GENERIC_TOKENS = new Set([
   '一个', '我们', '可以', '这个', '那个', '什么', '怎么', '没有',
 ]);
 
-const SITE_TOKEN_LOWER = new Set([
+const SITE_TOKEN_LOWER = new Set<string>([
   ...Object.values(SITE_LABELS).map((s) => s.toLowerCase()),
   ...Object.keys(SITE_LABELS),
   ...Object.keys(SITE_ALIASES),
   ...Object.values(SITE_ALIASES),
 ]);
 
-export function canonicalSite(domain) {
+export function canonicalSite(domain: string | undefined) {
   const d = String(domain || '').toLowerCase();
   if (!d) return '';
   return SITE_ALIASES[d] || d;
 }
 
-export function siteLabel(domain) {
+export function siteLabel(domain: string | undefined) {
   const key = canonicalSite(domain);
   if (!key) return '';
   return SITE_LABELS[key] || key;
 }
 
-export function isTemplateSite(domain) {
+export function isTemplateSite(domain: string | undefined) {
   return TEMPLATE_SITES.has(canonicalSite(domain));
 }
 
-export function siteOfTab(tab) {
+export function siteOfTab(tab: LabelTab | null | undefined) {
   const url = tab?.url;
   try {
     const host = new URL(String(url || '')).hostname.replace(/^www\./, '').toLowerCase();
@@ -145,10 +181,10 @@ export function siteOfTab(tab) {
   } catch {
     /* ignore */
   }
-  return canonicalSite(registrableDomain(url) || '');
+  return canonicalSite(registrableDomain(url || '') || '');
 }
 
-export function pathOwner(tab) {
+export function pathOwner(tab: LabelTab | null | undefined) {
   const site = siteOfTab(tab);
   const reserved = PATH_GROUP_SITES[site];
   if (!reserved) return '';
@@ -165,11 +201,11 @@ export function pathOwner(tab) {
   }
 }
 
-function normalizeHandle(s) {
+function normalizeHandle(s: string | undefined) {
   return String(s || '').trim().replace(/^@/, '').toLowerCase();
 }
 
-export function parseCompoundSiteName(name) {
+export function parseCompoundSiteName(name: string | undefined) {
   const s = String(name || '').trim();
   const i = s.indexOf('|');
   if (i <= 0) return null;
@@ -179,7 +215,7 @@ export function parseCompoundSiteName(name) {
   return { label, part };
 }
 
-export function compoundSiteName(label, part) {
+export function compoundSiteName(label: string | undefined, part: string | undefined) {
   const a = String(label || '').trim();
   const b = String(part || '').replace(/^@/, '').trim();
   if (!a) return b.slice(0, 24);
@@ -187,13 +223,13 @@ export function compoundSiteName(label, part) {
   return `${a}|${b}`.slice(0, 24);
 }
 
-function qualifierOfName(name) {
+function qualifierOfName(name: string | undefined) {
   const parsed = parseCompoundSiteName(name);
   return normalizeHandle(parsed ? parsed.part : name);
 }
 
-function majorityOwner(tabs, minShare = 0.67) {
-  const freq = new Map();
+function majorityOwner(tabs: LabelTab[] | undefined, minShare = 0.67) {
+  const freq = new Map<string, number>();
   for (const t of tabs || []) {
     const o = normalizeHandle(pathOwner(t));
     if (!o) continue;
@@ -212,8 +248,8 @@ function majorityOwner(tabs, minShare = 0.67) {
   return best;
 }
 
-function sharedContentToken(tabs) {
-  const df = new Map();
+function sharedContentToken(tabs: LabelTab[] | undefined) {
+  const df = new Map<string, number>();
   for (const t of tabs || []) {
     for (const tok of tokenizeTitle(contentTitle(t))) {
       if (isSiteishToken(tok) || GENERIC_TOKENS.has(tok) || /^\d+$/.test(tok)) continue;
@@ -232,11 +268,11 @@ function sharedContentToken(tabs) {
   return best ? displayToken(best) : '';
 }
 
-function inferTemplateQualifier(tabs) {
+function inferTemplateQualifier(tabs: LabelTab[] | undefined) {
   return majorityOwner(tabs, 0.67) || sharedContentToken(tabs);
 }
 
-export function nameTemplateGroup(site, tabs, fallbackName = '') {
+export function nameTemplateGroup(site: string | undefined, tabs: LabelTab[] | undefined, fallbackName = '') {
   const label = siteLabel(site);
   const inferred = inferTemplateQualifier(tabs);
   if (inferred) return compoundSiteName(label, inferred);
@@ -254,24 +290,24 @@ export function nameTemplateGroup(site, tabs, fallbackName = '') {
   return label;
 }
 
-function formatPathOwner(site, owner) {
+function formatPathOwner(site: string | undefined, owner: string | undefined) {
   const raw = String(owner || '').replace(/^@/, '');
   if (!raw) return '';
   if (isTemplateSite(site)) return compoundSiteName(siteLabel(site), raw);
   return raw.slice(0, 24);
 }
 
-function isAuthorGroupName(name, tabs) {
+function isAuthorGroupName(name: string | undefined, tabs: LabelTab[] | undefined) {
   const want = qualifierOfName(name);
   if (!want || isJunkGroupName(want)) return false;
-  const owners = new Set(
+  const owners = new Set<string>(
     (tabs || []).map((t) => normalizeHandle(pathOwner(t))).filter(Boolean),
   );
   return owners.size === 1 && owners.has(want);
 }
 
 /** 已有标签组的限定词（X|alice → alice），给并入匹配用 */
-export function groupQualifier(g) {
+export function groupQualifier(g: LabelGroupInput | null | undefined) {
   const name = String(g?.name || g?.title || '').trim();
   const parsed = parseCompoundSiteName(name);
   if (parsed) return normalizeHandle(parsed.part);
@@ -280,7 +316,7 @@ export function groupQualifier(g) {
 }
 
 /** 套话站标题去掉「在 X 上的帖子」等壳，剩下才是正文 */
-export function contentTitle(tab) {
+export function contentTitle(tab: LabelTab | null | undefined) {
   const site = siteOfTab(tab);
   let t = String(tab?.title || '').trim();
   if (!t || !isTemplateSite(site)) return t;
@@ -289,7 +325,7 @@ export function contentTitle(tab) {
     const q = brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const onBody = t.match(new RegExp(`^.+?\\s+on\\s+${q}:\\s*(.+)$`, 'i'));
     if (onBody) {
-      t = onBody[1].trim().replace(/^["「『]|["」』]$/g, '').trim();
+      t = (onBody[1] || '').trim().replace(/^["「『]|["」』]$/g, '').trim();
       break;
     }
     t = t
@@ -304,7 +340,7 @@ export function contentTitle(tab) {
   return t;
 }
 
-export function isJunkGroupName(name) {
+export function isJunkGroupName(name: string | undefined) {
   const s = String(name || '').trim();
   if (!s) return true;
   if ([...Object.values(SITE_LABELS)].includes(s)) return false;
@@ -316,8 +352,8 @@ export function isJunkGroupName(name) {
   return false;
 }
 
-export function majoritySite(tabs, minShare = 0.67) {
-  const freq = new Map();
+export function majoritySite(tabs: LabelTab[] | undefined, minShare = 0.67) {
+  const freq = new Map<string, number>();
   for (const t of tabs || []) {
     const s = siteOfTab(t);
     if (!s) continue;
@@ -336,7 +372,7 @@ export function majoritySite(tabs, minShare = 0.67) {
   return best;
 }
 
-export function finalizeGroupName(name, tabs) {
+export function finalizeGroupName(name: string | undefined, tabs: LabelTab[] | undefined) {
   const site = majoritySite(tabs);
   const label = site ? siteLabel(site) : '';
   const raw = String(name || '').trim();
@@ -346,9 +382,9 @@ export function finalizeGroupName(name, tabs) {
   return raw.slice(0, 24);
 }
 
-function dedupeTabs(tabs) {
-  const seen = new Set();
-  const out = [];
+function dedupeTabs(tabs: LabelTab[] | undefined) {
+  const seen = new Set<TabId>();
+  const out: LabelTab[] = [];
   for (const t of tabs || []) {
     if (!t || seen.has(t.id)) continue;
     seen.add(t.id);
@@ -357,7 +393,7 @@ function dedupeTabs(tabs) {
   return out;
 }
 
-function asGroup(name, tabs) {
+function asGroup(name: string, tabs: LabelTab[] | undefined): LabelGroup {
   const uniq = dedupeTabs(tabs);
   return {
     key: name,
@@ -367,8 +403,8 @@ function asGroup(name, tabs) {
   };
 }
 
-export function tokenizeTitle(text) {
-  const tokens = [];
+export function tokenizeTitle(text: string | undefined) {
+  const tokens: string[] = [];
   const s = String(text || '');
   for (const m of s.matchAll(/[A-Za-z][A-Za-z0-9+#._-]{1,24}/g)) {
     tokens.push(m[0].toLowerCase());
@@ -386,20 +422,20 @@ export function tokenizeTitle(text) {
   );
 }
 
-function isSiteishToken(tok) {
+function isSiteishToken(tok: string | undefined) {
   return SITE_TOKEN_LOWER.has(String(tok || '').toLowerCase());
 }
 
-function displayToken(tok) {
+function displayToken(tok: string | undefined) {
   const s = String(tok || '');
   if (/^[a-z]/.test(s)) return s.charAt(0).toUpperCase() + s.slice(1);
   return s;
 }
 
-function urlPathTokens(tab) {
+function urlPathTokens(tab: LabelTab | null | undefined) {
   try {
     const parts = new URL(String(tab?.url || '')).pathname.split('/').filter(Boolean);
-    const out = [];
+    const out: string[] = [];
     for (const p of parts.slice(0, 4)) {
       const decoded = decodeURIComponent(p).replace(/\.[a-z0-9]+$/i, '');
       out.push(...tokenizeTitle(decoded));
@@ -410,16 +446,16 @@ function urlPathTokens(tab) {
   }
 }
 
-function tokensOfTab(tab) {
+function tokensOfTab(tab: LabelTab | null | undefined) {
   const title = isTemplateSite(siteOfTab(tab)) ? contentTitle(tab) : (tab?.title || '');
-  return new Set([
+  return new Set<string>([
     ...tokenizeTitle(title),
     ...tokenizeTitle(pathOwner(tab)),
     ...urlPathTokens(tab),
   ]);
 }
 
-function sameId(a, b) {
+function sameId(a: unknown, b: unknown) {
   if (a == null || b == null) return false;
   return String(a) === String(b);
 }
@@ -428,7 +464,7 @@ function sameId(a, b) {
  * 当前页当种子：同站同作者、非套话站的同站、或跨站共享实词。
  * 套话站（X 等）不要把整站都算匹配，只认同一 handle 或标题里的实词。
  */
-export function tabMatchesSeed(tab, seed) {
+export function tabMatchesSeed(tab: LabelTab | null | undefined, seed: LabelTab | null | undefined) {
   if (!tab || !seed) return false;
   if (sameId(tab.id, seed.id) || (tab.tabId != null && sameId(tab.tabId, seed.tabId ?? seed.id))) {
     return true;
@@ -453,7 +489,7 @@ export function tabMatchesSeed(tab, seed) {
 }
 
 /** 用户指定主题：标题/网址包含该词，或标题路径 token 对得上 */
-export function tabMatchesTopic(tab, query) {
+export function tabMatchesTopic(tab: LabelTab | null | undefined, query: string | undefined) {
   const q = String(query || '').trim();
   if (!q || !tab) return false;
   const qNorm = q.replace(/^@/, '').toLowerCase();
@@ -471,16 +507,16 @@ export function tabMatchesTopic(tab, query) {
   return false;
 }
 
-export function topicGroupName(query) {
+export function topicGroupName(query: string | undefined) {
   return String(query || '').trim().replace(/\s+/g, ' ').slice(0, 24) || '标签组';
 }
 
 /** 以当前页为种子时，新建组该叫什么 */
-export function nameForSeedGroup(seed, members) {
+export function nameForSeedGroup(seed: LabelTab | undefined, members?: LabelTab[]) {
   const tabs = members?.length ? members : (seed ? [seed] : []);
   const site = siteOfTab(seed);
   if (isTemplateSite(site)) return nameTemplateGroup(site, tabs, siteLabel(site));
-  const sites = new Set(tabs.map((t) => siteOfTab(t)).filter(Boolean));
+  const sites = new Set<string>(tabs.map((t) => siteOfTab(t)).filter(Boolean));
   if (sites.size > 1) {
     const shared = sharedContentToken(tabs);
     if (shared) return shared;
@@ -492,19 +528,23 @@ export function nameForSeedGroup(seed, members) {
   return site ? siteLabel(site) : '标签组';
 }
 
-function siteBucketsOnly(items) {
-  const buckets = new Map();
-  const ungrouped = [];
+function siteBucketsOnly(items: LabelTab[] | undefined): LabelPreview {
+  const buckets = new Map<string, LabelTab[]>();
+  const ungrouped: LabelTab[] = [];
   for (const item of items || []) {
     const key = siteOfTab(item);
     if (!key) {
       ungrouped.push(item);
       continue;
     }
-    if (!buckets.has(key)) buckets.set(key, []);
-    buckets.get(key).push(item);
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(key, bucket);
+    }
+    bucket.push(item);
   }
-  const groups = [];
+  const groups: LabelGroup[] = [];
   for (const [key, tabs] of buckets) {
     if (tabs.length >= 2) {
       const name = isTemplateSite(key) ? nameTemplateGroup(key, tabs, siteLabel(key)) : siteLabel(key);
@@ -518,7 +558,7 @@ function siteBucketsOnly(items) {
  * 预览组是否只是「某站的桶」（不是 React / facebook 这种主题或 owner 名）。
  * 主题组不要按站点并进已有 GitHub。
  */
-export function groupIsSiteish(g) {
+export function groupIsSiteish(g: LabelGroupInput | null | undefined) {
   const name = String(g?.name || '').trim();
   const tabs = g?.tabs || [];
   const site = majoritySite(tabs);
@@ -533,30 +573,33 @@ export function groupIsSiteish(g) {
  * 未成组 + 非套话残词组里，把跨站重复出现的标题/路径词剥成主题组。
  * 套话站只用剥壳后的正文；从已有组抽走标签时，避免把该组抽成只剩 1 条。
  */
-function peelCrossSiteTopics(preview) {
+function peelCrossSiteTopics(preview: LabelPreviewInput | undefined): LabelPreview {
   const flexible = [...(preview?.groups || [])];
   const ungroupedPool = [...(preview?.ungrouped || [])];
-  const pool = [...flexible.flatMap((g) => g.tabs), ...ungroupedPool];
+  const pool = [...flexible.flatMap((g) => g.tabs || []), ...ungroupedPool];
 
-  const groupOf = new Map();
+  const groupOf = new Map<TabId, LabelGroupInput>();
   for (const g of flexible) {
-    for (const t of g.tabs) groupOf.set(t.id, g);
+    for (const t of g.tabs || []) groupOf.set(t.id, g);
   }
 
-  const byTok = new Map();
+  const byTok = new Map<string, TopicRec>();
   for (const t of pool) {
     const site = siteOfTab(t);
     for (const tok of tokensOfTab(t)) {
       if (isSiteishToken(tok) || GENERIC_TOKENS.has(tok)) continue;
-      if (!byTok.has(tok)) byTok.set(tok, { tabs: new Map(), sites: new Set() });
-      const rec = byTok.get(tok);
+      let rec = byTok.get(tok);
+      if (!rec) {
+        rec = { tabs: new Map<TabId, LabelTab>(), sites: new Set<string>() };
+        byTok.set(tok, rec);
+      }
       rec.tabs.set(t.id, t);
       if (site) rec.sites.add(site);
     }
   }
 
   const poolN = pool.length;
-  const candidates = [];
+  const candidates: { tok: string; tabs: LabelTab[] }[] = [];
   for (const [tok, rec] of byTok) {
     if (rec.tabs.size < 2 || rec.sites.size < 2) continue;
     if (/^\d+$/.test(tok)) continue;
@@ -566,44 +609,48 @@ function peelCrossSiteTopics(preview) {
   }
   candidates.sort((a, b) => b.tok.length - a.tok.length || b.tabs.length - a.tabs.length);
 
-  const used = new Set();
-  const topicGroups = [];
+  const used = new Set<TabId>();
+  const topicGroups: LabelGroup[] = [];
   for (const c of candidates) {
     const tabs = c.tabs.filter((t) => !used.has(t.id));
-    const accepted = [];
-    const byGroup = new Map();
+    const accepted: LabelTab[] = [];
+    const byGroup = new Map<LabelGroupInput, LabelTab[]>();
     for (const t of tabs) {
       const g = groupOf.get(t.id);
       if (!g) {
         accepted.push(t);
         continue;
       }
-      if (!byGroup.has(g)) byGroup.set(g, []);
-      byGroup.get(g).push(t);
+      let matched = byGroup.get(g);
+      if (!matched) {
+        matched = [];
+        byGroup.set(g, matched);
+      }
+      matched.push(t);
     }
     for (const [g, matched] of byGroup) {
-      const remain = g.tabs.length - matched.length;
-      const share = matched.length / g.tabs.length;
+      const remain = (g.tabs || []).length - matched.length;
+      const share = matched.length / (g.tabs || []).length;
       if (remain === 0 || remain >= 2 || share >= 0.67) accepted.push(...matched);
     }
-    const sites = new Set(accepted.map((t) => siteOfTab(t)).filter(Boolean));
+    const sites = new Set<string>(accepted.map((t) => siteOfTab(t)).filter(Boolean));
     if (accepted.length < 2 || sites.size < 2) continue;
     for (const t of accepted) used.add(t.id);
     topicGroups.push(asGroup(displayToken(c.tok).slice(0, 24), accepted));
   }
 
-  const leftoverTabs = [];
-  const leftoverGroups = [];
+  const leftoverTabs: LabelTab[] = [];
+  const leftoverGroups: LabelGroup[] = [];
   for (const g of flexible) {
-    const tabs = g.tabs.filter((t) => !used.has(t.id));
-    if (tabs.length >= 2) leftoverGroups.push(asGroup(g.name, tabs));
+    const tabs = (g.tabs || []).filter((t) => !used.has(t.id));
+    if (tabs.length >= 2) leftoverGroups.push(asGroup(g.name || '', tabs));
     else leftoverTabs.push(...tabs);
   }
   leftoverTabs.push(...ungroupedPool.filter((t) => !used.has(t.id)));
   const rest = siteBucketsOnly(leftoverTabs);
 
-  const merged = new Map();
-  const push = (g) => {
+  const merged = new Map<string, LabelGroup>();
+  const push = (g: LabelGroup | undefined) => {
     if (!g || g.tabs.length < 2) return;
     const cur = merged.get(g.name);
     merged.set(g.name, cur ? asGroup(g.name, [...cur.tabs, ...g.tabs]) : g);
@@ -615,9 +662,9 @@ function peelCrossSiteTopics(preview) {
   const groups = [...merged.values()].filter((g) => g.tabs.length >= 2);
   groups.sort((a, b) => b.tabs.length - a.tabs.length || a.name.localeCompare(b.name, 'zh'));
 
-  const usedIds = new Set(groups.flatMap((g) => g.tabIds));
-  const ungrouped = [];
-  const seen = new Set();
+  const usedIds = new Set<TabId>(groups.flatMap((g) => g.tabIds));
+  const ungrouped: LabelTab[] = [];
+  const seen = new Set<TabId>();
   for (const t of [...rest.ungrouped, ...ungroupedPool, ...pool]) {
     if (!t || usedIds.has(t.id) || seen.has(t.id)) continue;
     seen.add(t.id);
@@ -629,13 +676,13 @@ function peelCrossSiteTopics(preview) {
 /**
  * 所有分类后端的统一收尾：套话残词换成站点名，忙的套话站按作者拆，再剥跨站主题。
  */
-export function finalizePreview(preview) {
-  const ungrouped = [...(preview?.ungrouped || [])];
-  const templateBuckets = new Map();
-  const restGroups = [];
+export function finalizePreview(preview: LabelPreviewInput | undefined): LabelPreview {
+  const ungrouped: LabelTab[] = [...(preview?.ungrouped || [])];
+  const templateBuckets = new Map<string, LabelTab[]>();
+  const restGroups: LabelGroup[] = [];
 
-  const addTemplate = (site, tabs) => {
-    const cur = templateBuckets.get(site) || [];
+  const addTemplate = (site: string, tabs: LabelTab[]) => {
+    const cur: LabelTab[] = templateBuckets.get(site) || [];
     cur.push(...tabs);
     templateBuckets.set(site, cur);
   };
@@ -650,8 +697,8 @@ export function finalizePreview(preview) {
     const junk = isJunkGroupName(g.name);
     const peel = !!(site && isTemplateSite(site) && (junk || majoritySite(tabs, 0.8) === site));
     if (peel && !isAuthorGroupName(g.name, tabs) && !parseCompoundSiteName(g.name)) {
-      const mine = [];
-      const other = [];
+      const mine: LabelTab[] = [];
+      const other: LabelTab[] = [];
       for (const t of tabs) {
         if (siteOfTab(t) === site) mine.push(t);
         else other.push(t);
@@ -664,8 +711,8 @@ export function finalizePreview(preview) {
     restGroups.push(asGroup(finalizeGroupName(g.name, tabs), tabs));
   }
 
-  const merged = new Map();
-  const push = (g) => {
+  const merged = new Map<string, LabelGroup>();
+  const push = (g: LabelGroup) => {
     if (g.tabs.length < 2) {
       ungrouped.push(...g.tabs);
       return;
@@ -679,9 +726,9 @@ export function finalizePreview(preview) {
   const groups = [...merged.values()].filter((g) => g.tabs.length >= 2);
   groups.sort((a, b) => b.tabs.length - a.tabs.length || a.name.localeCompare(b.name, 'zh'));
 
-  const used = new Set(groups.flatMap((g) => g.tabIds));
-  const rest = [];
-  const seenU = new Set();
+  const used = new Set<TabId>(groups.flatMap((g) => g.tabIds));
+  const rest: LabelTab[] = [];
+  const seenU = new Set<TabId>();
   for (const t of ungrouped) {
     if (!t || used.has(t.id) || seenU.has(t.id)) continue;
     seenU.add(t.id);
@@ -691,19 +738,23 @@ export function finalizePreview(preview) {
 }
 
 /** 按站点分组（site 模式）；twitter.com 与 x.com 同一组，显示名用 SITE_LABELS */
-export function suggestGroups(items) {
-  const buckets = new Map();
-  const ungrouped = [];
+export function suggestGroups(items: LabelTab[]): LabelPreview {
+  const buckets = new Map<string, LabelTab[]>();
+  const ungrouped: LabelTab[] = [];
   for (const item of items) {
     const key = siteOfTab(item);
     if (!key) {
       ungrouped.push(item);
       continue;
     }
-    if (!buckets.has(key)) buckets.set(key, []);
-    buckets.get(key).push(item);
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(key, bucket);
+    }
+    bucket.push(item);
   }
-  const groups = [];
+  const groups: LabelGroup[] = [];
   for (const [key, tabs] of buckets) {
     if (tabs.length >= 2) {
       const name = isTemplateSite(key) ? nameTemplateGroup(key, tabs, siteLabel(key)) : siteLabel(key);
@@ -718,31 +769,35 @@ export function suggestGroups(items) {
  * GitHub：至少两个 owner 各有 ≥2 个标签才拆。
  * X 等套话站：任一作者 ≥2 条就拆成 X|handle，避免整站只剩一个「X」。
  */
-function splitBusySiteGroups(preview) {
-  const groups = [];
-  const ungrouped = [...(preview.ungrouped || [])];
+function splitBusySiteGroups(preview: LabelPreviewInput): LabelPreview {
+  const groups: LabelGroup[] = [];
+  const ungrouped: LabelTab[] = [...(preview.ungrouped || [])];
   for (const g of preview.groups || []) {
     const site = majoritySite(g.tabs, 0.8);
     if (!site || !PATH_GROUP_SITES[site]) {
-      groups.push(g);
+      groups.push(asGroup(g.name || '', g.tabs));
       continue;
     }
-    const byOwner = new Map();
-    const rest = [];
-    for (const t of g.tabs) {
+    const byOwner = new Map<string, OwnerBucket>();
+    const rest: LabelTab[] = [];
+    for (const t of g.tabs || []) {
       const owner = pathOwner(t);
       if (!owner) {
         rest.push(t);
         continue;
       }
       const k = owner.toLowerCase();
-      if (!byOwner.has(k)) byOwner.set(k, { raw: owner, tabs: [] });
-      byOwner.get(k).tabs.push(t);
+      let rec = byOwner.get(k);
+      if (!rec) {
+        rec = { raw: owner, tabs: [] };
+        byOwner.set(k, rec);
+      }
+      rec.tabs.push(t);
     }
     const busy = [...byOwner.values()].filter((x) => x.tabs.length >= 2);
     const template = isTemplateSite(site);
     if (!template && busy.length < 2) {
-      groups.push(g);
+      groups.push(asGroup(g.name || '', g.tabs));
       continue;
     }
     if (template && !busy.length) {

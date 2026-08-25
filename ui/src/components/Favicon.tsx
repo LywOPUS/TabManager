@@ -1,4 +1,5 @@
 import { memo, useMemo, useState } from 'react'
+import { isNonEmptyString } from '@ext/lib/unknown.ts'
 import { cn } from '@/lib/utils'
 
 export function domainOf(url: string) {
@@ -24,9 +25,9 @@ export const Favicon = memo(function Favicon({
   const srcs = useMemo(() => {
     const extId = globalThis.chrome?.runtime?.id
     return [
-      extId ? `chrome-extension://${extId}/_favicon/?pageUrl=${encodeURIComponent(url)}&size=32` : null,
-      favIconUrl || null,
-    ].filter(Boolean) as string[]
+      extId ? `chrome-extension://${extId}/_favicon/?pageUrl=${encodeURIComponent(url)}&size=32` : '',
+      favIconUrl || '',
+    ].filter(isNonEmptyString)
   }, [url, favIconUrl])
 
   if (stage >= srcs.length) {

@@ -7,18 +7,20 @@ import {
   newId,
   buildExportPayload,
   mergeImport,
-} from '@ext/lib/storage.js'
+} from '@ext/lib/storage.ts'
+import type { Session, StashedTab, StoreData } from '@ext/lib/storage.ts'
 import {
   ensureFixedGroups,
   isReadLaterName,
   isUngroupedName,
   pruneEmptyKeepFixed,
-} from '@ext/lib/groupNames.js'
+} from '@ext/lib/groupNames.ts'
 
 export { updateSession, deleteSession, newId, buildExportPayload, mergeImport }
 
-export { suggestGroupsSmart } from '@ext/lib/localClassify.js'
-export { proposeEnhancement, applyEnhancement, applyPreviewToSession } from '@ext/lib/agentEnhance.js'
+export { suggestGroupsSmart } from '@ext/lib/localClassify.ts'
+export type { ClassifyPreview } from '@ext/lib/localClassify.ts'
+export { proposeEnhancement, applyEnhancement } from '@ext/lib/agentEnhance.ts'
 export {
   READ_LATER_NAME,
   UNGROUPED_NAME,
@@ -30,14 +32,14 @@ export {
   tabsForSuggest,
   findReadLaterGroup,
   pruneEmptyKeepFixed,
-} from '@ext/lib/groupNames.js'
+} from '@ext/lib/groupNames.ts'
 export {
   preloadBrowserModel,
   getBrowserModelWarmState,
   getLastEmbedDevice,
   unloadBrowserModel,
-} from '@ext/lib/browserEmbedClassify.js'
-import { isBrowserModelCacheReady } from '@ext/lib/browserModelCache.js'
+} from '@ext/lib/browserEmbedClassify.ts'
+import { isBrowserModelCacheReady } from '@ext/lib/browserModelCache.ts'
 export {
   MODEL_NOT_DOWNLOADED,
   inspectBrowserModelCache,
@@ -45,17 +47,20 @@ export {
   deleteBrowserModelCache,
   purgeLeftoverModelCache,
   isBrowserModelCacheReady,
-} from '@ext/lib/browserModelCache.js'
+} from '@ext/lib/browserModelCache.ts'
+export type { ModelCacheInventory, ModelCacheRow } from '@ext/lib/browserModelCache.ts'
 export {
   collectClosableTabs,
   CLOSE_IDLE_MS,
-} from '@ext/lib/closeSuggest.js'
+} from '@ext/lib/closeSuggest.ts'
+export type { ClosableTab, ClosableTabsResult } from '@ext/lib/closeSuggest.ts'
 export {
   findDuplicates,
   removeDuplicates,
   findOpenTabDuplicates,
   closeOpenTabDuplicates,
-} from '@ext/lib/dedup.js'
+} from '@ext/lib/dedup.ts'
+export type { OpenDupeGroup, OpenDupeLoc, StashDupeGroup } from '@ext/lib/dedup.ts'
 export {
   collectTabUsage,
   discardTabsByIds,
@@ -67,19 +72,23 @@ export {
   processesApiAvailable,
   ensureProcessesPermission,
   isActionableUsageRow,
-} from '@ext/lib/tabUsage.js'
+} from '@ext/lib/tabUsage.ts'
+export type { UsageRow, TabUsageResult } from '@ext/lib/tabUsage.ts'
 import {
   getSettings,
   setSettings,
   classifyOptsFromSettings,
-} from '@ext/lib/settings.js'
+} from '@ext/lib/settings.ts'
+import type { TabManagerSettings } from '@ext/lib/settings.ts'
 export {
   getSettings,
   setSettings,
   classifyOptsFromSettings,
 }
-export { BROWSER_MODELS } from '@ext/lib/browserModels.js'
-export { isRestorableUrl } from '@ext/lib/urls.js'
+export type { TabManagerSettings }
+export { BROWSER_MODELS, DEFAULT_BROWSER_MODEL } from '@ext/lib/browserModels.ts'
+export type { BrowserModelMeta } from '@ext/lib/browserModels.ts'
+export { isRestorableUrl } from '@ext/lib/urls.ts'
 export {
   mergeOrganizeSummary,
   getCurrentWindowOrganizePreview,
@@ -87,90 +96,77 @@ export {
   applyLivePlan,
   mergeAndOrganizeCurrent,
   summarizeHighlightedTabs,
-} from '@ext/lib/liveOrganize.js'
+} from '@ext/lib/liveOrganize.ts'
+export type {
+  LiveApplyResult,
+  LivePlan,
+  LivePreview,
+  LivePreviewResult,
+  MergeOrganizeResult,
+  MergeOrganizeSummary,
+} from '@ext/lib/liveOrganize.ts'
+import { isRecord, optString } from '@ext/lib/unknown.ts'
+import {
+  parseOrganizeJobResult,
+  type OrganizeApply,
+  type OrganizeJobName,
+  type OrganizeJobOk,
+  type OrganizeJobResult,
+} from '@ext/lib/organizeJob.ts'
 
-export type OrganizeJobResult = {
-  ok?: boolean
-  reason?: string
-  error?: string
-  count?: number
-  name?: string
-  moved?: number
-  topic?: string
-  source?: string
-  apply?: { created?: number; absorbTabs?: number; merged?: number }
-  summary?: { movableTabs?: number }
-}
+export { parseOrganizeJobResult }
+export type { OrganizeApply, OrganizeJobFail, OrganizeJobName, OrganizeJobOk, OrganizeJobResult } from '@ext/lib/organizeJob.ts'
+
+export type MoveTabResult =
+  | { ok: false; reason: 'missing' | 'no_tab' }
+  | { ok: true }
+
+export type DissolveResult =
+  | { ok: false; reason: 'missing' | 'no_group' | 'ungrouped' | 'read_later' }
+  | { ok: true; moved: number; name: string }
 
 /** 弹窗整理：只发消息，活在 background。关掉弹窗也不中断。 */
 export async function runPopupOrganize(
-  op: 'window' | 'selected' | 'around' | 'topic' | 'related-summary' | 'related' | 'merge',
+  op: OrganizeJobName,
   payload: { query?: string } = {},
   onStatus?: (text: string) => void,
 ): Promise<OrganizeJobResult> {
   const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const onMsg = (msg: { type?: string; reqId?: string; text?: string }) => {
-    if (msg?.type === 'tm-job-status' && msg.reqId === reqId && msg.text) {
-      const t = String(msg.text)
-      onStatus?.(/文件已齐|下载中|^从 .+ 拉取|正在下载/.test(t) ? '正在加载模型' : t)
-    }
+  const onMsg: Parameters<typeof chrome.runtime.onMessage.addListener>[0] = (msg) => {
+    if (!isRecord(msg) || msg.type !== 'tm-job-status' || msg.reqId !== reqId) return
+    const text = optString(msg.text)
+    if (!text) return
+    onStatus?.(/文件已齐|下载中|^从 .+ 拉取|正在下载/.test(text) ? '正在加载模型' : text)
   }
   chrome.runtime.onMessage.addListener(onMsg)
   try {
-    const r = await chrome.runtime.sendMessage({
+    const r: unknown = await chrome.runtime.sendMessage({
       type: 'tm-organize',
       job: op,
       reqId,
       query: payload.query,
     })
     if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message)
-    if (!r) return { ok: false, reason: 'stale_sw' }
-    if (r.reason === 'unknown' || r.error === 'unknown') {
-      return { ok: false, reason: 'stale_sw', error: r.error }
-    }
-    return r
+    return parseOrganizeJobResult(r)
   } finally {
     chrome.runtime.onMessage.removeListener(onMsg)
   }
 }
-export { summarizeOpenTabGroups, ungroupAllWindows } from '@ext/lib/ungroupTabs.js'
-export { restoreGroup, restoreSessionGroups } from '@ext/lib/restore.js'
+export { summarizeOpenTabGroups, ungroupAllWindows } from '@ext/lib/ungroupTabs.ts'
+export { restoreGroup, restoreSessionGroups } from '@ext/lib/restore.ts'
 
-export type StashedTab = {
-  id: string
-  title: string
-  url: string
-  favIconUrl?: string
+export type { StashedTab, Group, Session, StoreData } from '@ext/lib/storage.ts'
+
+export async function getData() {
+  return getDataRaw()
 }
 
-export type Group = {
-  id: string
-  name: string
-  tabs: StashedTab[]
+export async function mutateData<T>(mutator: (data: StoreData) => T | Promise<T>) {
+  return mutateDataRaw(mutator)
 }
 
-export type Session = {
-  id: string
-  name: string
-  createdAt: number
-  groups: Group[]
-}
-
-export type StoreData = {
-  schemaVersion: number
-  sessions: Session[]
-}
-
-export async function getData(): Promise<StoreData> {
-  return getDataRaw() as Promise<StoreData>
-}
-
-export async function mutateData<T>(mutator: (data: StoreData) => T | Promise<T>): Promise<T> {
-  return mutateDataRaw(mutator) as Promise<T>
-}
-
-export async function getRecentSession(): Promise<Session | null> {
-  return getRecentSessionRaw() as Promise<Session | null>
+export async function getRecentSession() {
+  return getRecentSessionRaw()
 }
 
 export function tabCount(session: Session) {
@@ -190,10 +186,10 @@ export async function moveTabToGroup(
   sessionId: string,
   tabId: string,
   target: 'readLater' | 'ungrouped',
-) {
-  return mutateData((data) => {
+): Promise<MoveTabResult> {
+  return mutateData((data): MoveTabResult => {
     const session = data.sessions.find((s) => s.id === sessionId)
-    if (!session) return { ok: false as const, reason: 'missing' }
+    if (!session) return { ok: false, reason: 'missing' }
     const { readLater, ungrouped } = ensureFixedGroups(session, { newId })
     let tab: StashedTab | null = null
     for (const g of session.groups) {
@@ -204,11 +200,11 @@ export async function moveTabToGroup(
         break
       }
     }
-    if (!tab) return { ok: false as const, reason: 'no_tab' }
+    if (!tab) return { ok: false, reason: 'no_tab' }
     ;(target === 'readLater' ? readLater : ungrouped).tabs.push(tab)
     pruneEmptyKeepFixed(session)
     ensureFixedGroups(session, { newId })
-    return { ok: true as const }
+    return { ok: true }
   })
 }
 
@@ -216,22 +212,22 @@ export async function moveTabToGroup(
  * 解散分组：标签并入「未分组」。
  * 「未分组」「稍后阅读」不可解散；其它主题组解散后删除。
  */
-export async function dissolveGroup(sessionId: string, groupId: string) {
-  return mutateData((data) => {
+export async function dissolveGroup(sessionId: string, groupId: string): Promise<DissolveResult> {
+  return mutateData((data): DissolveResult => {
     const session = data.sessions.find((s) => s.id === sessionId)
-    if (!session) return { ok: false as const, reason: 'missing' }
+    if (!session) return { ok: false, reason: 'missing' }
     const { ungrouped } = ensureFixedGroups(session, { newId })
     const group = session.groups.find((g) => g.id === groupId)
-    if (!group) return { ok: false as const, reason: 'no_group' }
-    if (isUngroupedName(group.name)) return { ok: false as const, reason: 'ungrouped' }
-    if (isReadLaterName(group.name)) return { ok: false as const, reason: 'read_later' }
+    if (!group) return { ok: false, reason: 'no_group' }
+    if (isUngroupedName(group.name)) return { ok: false, reason: 'ungrouped' }
+    if (isReadLaterName(group.name)) return { ok: false, reason: 'read_later' }
 
     const moved = group.tabs.length
     if (moved) ungrouped.tabs.push(...group.tabs)
     session.groups = session.groups.filter((g) => g.id !== groupId)
     pruneEmptyKeepFixed(session)
     ensureFixedGroups(session, { newId })
-    return { ok: true as const, moved, name: group.name }
+    return { ok: true, moved, name: group.name }
   })
 }
 
@@ -247,7 +243,7 @@ export function dissolveFailText(reason?: string) {
   return '解散失败'
 }
 
-export function dissolveOkText(r: { moved?: number; name?: string }) {
+export function dissolveOkText(r: Extract<DissolveResult, { ok: true }>) {
   return r.moved
     ? `已解散「${r.name}」，${r.moved} 个标签已移入未分组`
     : `已删除空分组「${r.name}」`
@@ -264,10 +260,7 @@ export function ungroupAllOkText(r: { tabCount: number; groupCount: number }) {
   return `已解散 ${r.groupCount} 个标签组（${r.tabCount} 个标签）`
 }
 
-export async function browserModelLibraryRequired(settings?: {
-  classifyMode?: string
-  browserModelId?: string
-}) {
+export async function browserModelLibraryRequired(settings?: TabManagerSettings) {
   const s = settings || (await getSettings())
   if (s.classifyMode !== 'browser') return false
   return !(await isBrowserModelCacheReady(s.browserModelId))
@@ -297,52 +290,35 @@ export function organizeFailText(reason?: string, error?: string) {
   return '整理失败'
 }
 
-export function organizeOkText(r: {
-  apply?: { created?: number; absorbTabs?: number; merged?: number }
-  source?: string
-}) {
-  const a = r.apply || {}
-  const parts = []
+function applyParts(apply: OrganizeApply | undefined, withMerged = true) {
+  const a = apply || {}
+  const parts: string[] = []
   if (a.absorbTabs) parts.push(`并入 ${a.absorbTabs}`)
   if (a.created) parts.push(`新建 ${a.created} 组`)
-  if (a.merged) parts.push(`合并 ${a.merged} 组`)
+  if (withMerged && a.merged) parts.push(`合并 ${a.merged} 组`)
+  return parts
+}
+
+export function organizeOkText(r: Pick<OrganizeJobOk, 'apply' | 'source'>) {
+  const parts = applyParts(r.apply)
   const src = sourceLabel(r.source)
   return parts.length ? `已整理 · ${parts.join(' · ')}（${src}）` : `已整理当前窗口（${src}）`
 }
 
-export function selectedOrganizeOkText(r: {
-  apply?: { created?: number; absorbTabs?: number; merged?: number }
-  source?: string
-  count?: number
-}) {
-  const a = r.apply || {}
-  const parts = []
-  if (a.absorbTabs) parts.push(`并入 ${a.absorbTabs}`)
-  if (a.created) parts.push(`新建 ${a.created} 组`)
-  if (a.merged) parts.push(`合并 ${a.merged} 组`)
+export function selectedOrganizeOkText(r: Pick<OrganizeJobOk, 'apply' | 'source' | 'count'>) {
+  const parts = applyParts(r.apply)
   const src = sourceLabel(r.source)
   const n = r.count ? `${r.count} 个` : '选中'
   return parts.length ? `已整理${n}标签 · ${parts.join(' · ')}（${src}）` : `已整理${n}标签（${src}）`
 }
 
-export function seedOrganizeOkText(r: {
-  apply?: { created?: number; absorbTabs?: number }
-}) {
-  const a = r.apply || {}
-  const parts = []
-  if (a.absorbTabs) parts.push(`并入 ${a.absorbTabs}`)
-  if (a.created) parts.push(`新建 ${a.created} 组`)
+export function seedOrganizeOkText(r: Pick<OrganizeJobOk, 'apply'>) {
+  const parts = applyParts(r.apply, false)
   return parts.length ? `已按当前页归组 · ${parts.join(' · ')}` : '已按当前页归组'
 }
 
-export function topicOrganizeOkText(r: {
-  apply?: { created?: number; absorbTabs?: number }
-  topic?: string
-}) {
-  const a = r.apply || {}
-  const parts = []
-  if (a.absorbTabs) parts.push(`并入 ${a.absorbTabs}`)
-  if (a.created) parts.push(`新建 ${a.created} 组`)
+export function topicOrganizeOkText(r: Pick<OrganizeJobOk, 'apply' | 'topic'>) {
+  const parts = applyParts(r.apply, false)
   const topic = r.topic ? `「${r.topic}」` : '主题'
   return parts.length ? `已按${topic}归组 · ${parts.join(' · ')}` : `已按${topic}归组`
 }
@@ -352,7 +328,7 @@ export function relatedWindowPrompt(n: number, name?: string) {
   return `把 ${n} 个${label}标签移到新窗口并成组？`
 }
 
-export function relatedWindowOkText(r: { moved?: number; name?: string }) {
+export function relatedWindowOkText(r: Pick<OrganizeJobOk, 'moved' | 'name'>) {
   const name = r.name ? `「${r.name}」` : ''
   return `已将 ${r.moved ?? 0} 个标签移到新窗口${name}`
 }
@@ -362,11 +338,7 @@ export function mergeAllPrompt(otherWindows: number, movableTabs: number) {
   return `将 ${otherWindows} 个其他窗口的 ${movableTabs} 个标签并到当前窗口并整理？`
 }
 
-export function mergeOkText(r: {
-  apply?: { created?: number; absorbTabs?: number; merged?: number }
-  source?: string
-  summary?: { movableTabs?: number }
-}) {
+export function mergeOkText(r: Pick<OrganizeJobOk, 'apply' | 'source' | 'summary'>) {
   const moved = r.summary?.movableTabs
   const organized = organizeOkText(r)
   return moved ? `已合并 ${moved} 个标签 · ${organized}` : organized
@@ -379,6 +351,3 @@ export function sourceLabel(source: string | undefined) {
   return '分类模型'
 }
 
-export function classifyModeLabel(_mode?: string) {
-  return '浏览器内小模型'
-}
