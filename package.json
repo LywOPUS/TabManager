@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "vendor:transformers": "node scripts/vendor-transformers.mjs",
+    "vendor:transformers": "npx tsx scripts/vendor-transformers.ts",
     "dev:ui": "vite --config ui/vite.config.ts",
     "typecheck": "tsc -p ui/tsconfig.json --noEmit",
-    "check:groups": "node extension/lib/storage.test.mjs && node extension/lib/groupLabels.test.mjs && node extension/lib/liveOrganize.test.mjs && node extension/lib/localClassify.test.mjs && node extension/lib/browserEmbedClassify.test.mjs && node extension/lib/browserModelCache.test.mjs && node extension/lib/bgJobs.test.mjs && node extension/lib/offscreenRuntime.test.mjs && node extension/lib/closeSuggest.test.mjs",
+    "check:groups": "npx tsx extension/lib/storage.test.ts && npx tsx extension/lib/groupLabels.test.ts && npx tsx extension/lib/liveOrganize.test.ts && npx tsx extension/lib/localClassify.test.ts && npx tsx extension/lib/browserEmbedClassify.test.ts && npx tsx extension/lib/browserModelCache.test.ts && npx tsx extension/lib/bgJobs.test.ts && npx tsx extension/lib/offscreenRuntime.test.ts && npx tsx extension/lib/closeSuggest.test.ts",
     "test": "npm run check:groups",
     "check": "npm run typecheck && npm test && npm run build:ui",
     "build:ui": "vite build --config ui/vite.config.ts"
@@ -29,6 +29,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.12",
     "typescript": "^7.0.2",
     "vite": "^8.1.5"
   }
