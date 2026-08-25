@@ -36,7 +36,7 @@ export async function pickModelRemoteHost() {
       if (res.ok) return host;
       lastErr = `${host} ${res.status}`;
     } catch (e) {
-      lastErr = `${host} ${e?.name || e}`;
+      lastErr = `${host} ${e instanceof Error ? e.name : String(e)}`
     }
   }
   throw new Error(`连不上模型源（${lastErr || '网络失败'}）。可改用内置 MiniLM，或开代理后再下。`);

@@ -17,19 +17,10 @@ import {
   formatBytes,
   formatIdle,
   processesApiAvailable,
+  type ClosableTab,
 } from '@/lib/chrome-ext'
 
-type CloseRow = {
-  tabId: number
-  windowId: number
-  title: string
-  url: string
-  favIconUrl?: string
-  idleMs: number | null
-  discarded: boolean
-  reasons: string[]
-  bytes?: number | null
-}
+type CloseRow = ClosableTab & { bytes?: number | null }
 
 const FILTERS = [
   { key: 'stashed', label: '已收纳', match: (r: CloseRow) => r.reasons.includes('已收纳') },
@@ -40,6 +31,8 @@ const FILTERS = [
     match: (r: CloseRow) => r.reasons.includes('已休眠') || r.reasons.some((x) => x.startsWith('闲置')),
   },
 ] as const
+
+type CloseFilterKey = (typeof FILTERS)[number]['key']
 
 function isSuggested(r: CloseRow) {
   return r.reasons.length > 0
@@ -75,7 +68,7 @@ export function SidePanelApp() {
   const [closing, setClosing] = useState(false)
   const [msg, setMsg] = useState('')
   const [onlySuggested, setOnlySuggested] = useState(true)
-  const [filters, setFilters] = useState<Set<string>>(new Set())
+  const [filters, setFilters] = useState<Set<CloseFilterKey>>(new Set())
   const [windowLabels, setWindowLabels] = useState<Map<number, string>>(new Map())
   const [currentWindowId, setCurrentWindowId] = useState<number | null>(null)
   const [memAttached, setMemAttached] = useState(false)
@@ -99,8 +92,8 @@ export function SidePanelApp() {
       }
       setWindowLabels(labels)
       setCurrentWindowId(typeof win.id === 'number' ? win.id : null)
-      setRows(collected as CloseRow[])
-      setChecked(new Set((collected as CloseRow[]).filter(isSuggested).map((r) => r.tabId)))
+      setRows(collected)
+      setChecked(new Set(collected.filter(isSuggested).map((r) => r.tabId)))
       setLoading(false)
     } catch {
       setMsg('分析失败，请重试')
@@ -217,7 +210,7 @@ export function SidePanelApp() {
     })
   }
 
-  function toggleFilter(key: string) {
+  function toggleFilter(key: CloseFilterKey) {
     setFilters((prev) => {
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)

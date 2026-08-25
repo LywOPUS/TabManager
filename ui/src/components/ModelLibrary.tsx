@@ -6,32 +6,10 @@ import {
   preloadBrowserModel,
   purgeLeftoverModelCache,
   unloadBrowserModel,
+  type ModelCacheInventory,
 } from '@/lib/chrome-ext'
+import { errorMessage, isRecord } from '@ext/lib/unknown.ts'
 import { cn } from '@/lib/utils'
-
-type ModelRow = {
-  id: string
-  label: string
-  note: string
-  bundled: boolean
-  state: 'bundled' | 'ready' | 'partial' | 'leftover' | 'empty'
-  bytes: number
-  fileCount: number
-  leftoverBytes: number
-  missingGraph?: boolean
-  hint: string
-}
-
-type Orphan = { url: string; name: string; bytes: number }
-
-type Inventory = {
-  models: ModelRow[]
-  orphans: Orphan[]
-  leftoverBytes: number
-  leftoverCount: number
-  orphanBytes: number
-  totalBytes: number
-}
 
 type StatusDetail = {
   phase?: string
@@ -44,27 +22,44 @@ type Props = {
   onUse: (modelId: string) => void
 }
 
-function parseProgress(msg: string, detail?: StatusDetail) {
-  if (msg.startsWith('下载失败')) return { kind: 'error' as const, text: msg, pct: 0 }
-  if (detail?.phase === 'loading' || msg.startsWith('文件已齐') || msg.startsWith('加载') || msg.startsWith('编码') || msg.includes('改用')) {
-    return { kind: 'loading' as const, text: msg, pct: detail?.pct ?? 70 }
+type LibraryStatus =
+  | { kind: 'error'; text: string; pct: number }
+  | { kind: 'loading'; text: string; pct: number }
+  | { kind: 'downloading'; text: string; pct: number }
+  | { kind: 'checking'; text: string; pct: number }
+  | { kind: 'ready'; text: string; pct: number }
+  | { kind: 'idle'; text: string; pct: number }
+
+function statusDetail(detail: unknown): StatusDetail | undefined {
+  if (!isRecord(detail)) return undefined
+  return {
+    phase: typeof detail.phase === 'string' ? detail.phase : undefined,
+    pct: typeof detail.pct === 'number' ? detail.pct : undefined,
   }
-  if (detail?.phase === 'download' || msg.startsWith('下载')) {
-    return { kind: 'downloading' as const, text: msg, pct: detail?.pct ?? 4 }
+}
+
+function parseProgress(msg: string, detail?: unknown): LibraryStatus {
+  const info = statusDetail(detail)
+  if (msg.startsWith('下载失败')) return { kind: 'error', text: msg, pct: 0 }
+  if (info?.phase === 'loading' || msg.startsWith('文件已齐') || msg.startsWith('加载') || msg.startsWith('编码') || msg.includes('改用')) {
+    return { kind: 'loading', text: msg, pct: info?.pct ?? 70 }
   }
-  return { kind: 'checking' as const, text: msg, pct: detail?.pct ?? 8 }
+  if (info?.phase === 'download' || msg.startsWith('下载')) {
+    return { kind: 'downloading', text: msg, pct: info?.pct ?? 4 }
+  }
+  return { kind: 'checking', text: msg, pct: info?.pct ?? 8 }
 }
 
 export function ModelLibrary({ currentModelId, preferWebGPU, onUse }: Props) {
-  const [inv, setInv] = useState<Inventory | null>(null)
+  const [inv, setInv] = useState<ModelCacheInventory | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<string | null>(null)
-  const [status, setStatus] = useState<{ kind: string; text: string; pct: number } | null>(null)
+  const [status, setStatus] = useState<LibraryStatus | null>(null)
   const seqRef = useRef(0)
 
   const refresh = useCallback(() => {
     void inspectBrowserModelCache()
-      .then((next: unknown) => setInv(next as Inventory))
+      .then(setInv)
       .catch(() => setInv(null))
   }, [])
 
@@ -84,7 +79,7 @@ export function ModelLibrary({ currentModelId, preferWebGPU, onUse }: Props) {
     if (modelId !== currentModelId) onUse(modelId)
     void preloadBrowserModel(modelId, {
       preferWebGPU,
-      onStatus: (m: string, detail?: StatusDetail) => {
+      onStatus: (m: string, detail?: unknown) => {
         if (seq !== seqRef.current) return
         setStatus(parseProgress(m, detail))
       },
@@ -100,7 +95,7 @@ export function ModelLibrary({ currentModelId, preferWebGPU, onUse }: Props) {
         setBusyId(null)
         setStatus({
           kind: 'error',
-          text: `失败：${String((e as Error)?.message || e).slice(0, 160)}`,
+          text: `失败：${errorMessage(e).slice(0, 160)}`,
           pct: 0,
         })
         refresh()
@@ -119,7 +114,7 @@ export function ModelLibrary({ currentModelId, preferWebGPU, onUse }: Props) {
     } catch (e) {
       setStatus({
         kind: 'error',
-        text: `删除失败：${String((e as Error)?.message || e).slice(0, 60)}`,
+        text: `删除失败：${errorMessage(e).slice(0, 60)}`,
         pct: 0,
       })
     }
@@ -143,7 +138,7 @@ export function ModelLibrary({ currentModelId, preferWebGPU, onUse }: Props) {
     } catch (e) {
       setStatus({
         kind: 'error',
-        text: `清除失败：${String((e as Error)?.message || e).slice(0, 60)}`,
+        text: `清除失败：${errorMessage(e).slice(0, 60)}`,
         pct: 0,
       })
     }

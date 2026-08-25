@@ -1,19 +1,23 @@
-import { isRestorableUrl } from './urls.js';
-import { isUngroupedName } from './groupNames.js';
+import type { Group, Session } from './storage.js'
+import { isRestorableUrl } from './urls.js'
+import { isUngroupedName } from './groupNames.js'
 
-const CREATE_CHUNK = 6;
-const GROUP_COLORS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan'];
+const CREATE_CHUNK = 6
+const GROUP_COLORS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan'] as const
 
 function yieldUi(ms = 16) {
-  return new Promise((r) => setTimeout(r, ms));
+  return new Promise((r) => setTimeout(r, ms))
 }
 
 /**
  * 分批打开 URL，避免一次激活上百标签卡死。
  * @returns {Promise<number[]>} 新建 tabId 列表
  */
-export async function createTabsBatched(urls, { onProgress } = {}) {
-  const tabIds = [];
+export async function createTabsBatched(
+  urls: string[],
+  { onProgress }: { onProgress?: (msg: string) => void } = {},
+) {
+  const tabIds: number[] = []
   const list = urls.filter(isRestorableUrl);
   const total = list.length;
   for (let i = 0; i < list.length; i += CREATE_CHUNK) {
@@ -22,22 +26,28 @@ export async function createTabsBatched(urls, { onProgress } = {}) {
     const created = await Promise.all(
       chunk.map((url) => chrome.tabs.create({ url, active: false })),
     );
-    for (const t of created) tabIds.push(t.id);
+    for (const t of created) {
+      if (typeof t.id === 'number') tabIds.push(t.id)
+    }
     await yieldUi(CREATE_CHUNK > 4 ? 24 : 0);
   }
   return tabIds;
 }
 
 /** 恢复一个 Session Group：打开标签并打成原生标签组（≥2 时） */
-export async function restoreGroup(group, { onProgress, colorIndex = 0 } = {}) {
+export async function restoreGroup(
+  group: Group,
+  { onProgress, colorIndex = 0 }: { onProgress?: (msg: string) => void; colorIndex?: number } = {},
+) {
   const urls = (group.tabs || []).map((t) => t.url);
   const tabIds = await createTabsBatched(urls, { onProgress });
   if (tabIds.length >= 2) {
     onProgress?.(`创建标签组：${group.name}`);
-    const groupId = await chrome.tabs.group({ tabIds });
+    const [head, ...rest] = tabIds
+    const groupId = await chrome.tabs.group({ tabIds: [head, ...rest] })
     await chrome.tabGroups.update(groupId, {
       title: isUngroupedName(group.name) ? '' : group.name,
-      color: GROUP_COLORS[colorIndex % GROUP_COLORS.length],
+      color: GROUP_COLORS[colorIndex % GROUP_COLORS.length] ?? 'grey',
       collapsed: false,
     });
   }
@@ -45,7 +55,10 @@ export async function restoreGroup(group, { onProgress, colorIndex = 0 } = {}) {
 }
 
 /** 按会话内分组依次恢复（分批 + 可选进度） */
-export async function restoreSessionGroups(session, { onProgress } = {}) {
+export async function restoreSessionGroups(
+  session: Session,
+  { onProgress }: { onProgress?: (msg: string) => void } = {},
+) {
   let n = 0;
   let colorIdx = 0;
   const groups = session.groups || [];

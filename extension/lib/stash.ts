@@ -1,17 +1,35 @@
-import { isRestorableUrl, isStashableTab } from './urls.js';
-import { addSession, defaultSessionName, newId } from './storage.js';
-import { READ_LATER_NAME, UNGROUPED_NAME } from './groupNames.js';
+import { isRestorableUrl, isStashableTab } from './urls.js'
+import { addSession, defaultSessionName, newId, type Session, type StashedTab } from './storage.js'
+import { READ_LATER_NAME, UNGROUPED_NAME } from './groupNames.js'
 
-function tabToStashed(tab) {
+export type StashResultOk = {
+  ok: true
+  session: Session
+  count: number
+  skipped: number
+  skippedUnrestorable: number
+  keptActive?: boolean
+}
+
+export type StashResultFail = {
+  ok: false
+  reason: string
+  skipped?: number
+  skippedUnrestorable?: number
+}
+
+export type StashResult = StashResultOk | StashResultFail
+
+function tabToStashed(tab: chrome.tabs.Tab): StashedTab {
   return {
     id: newId(),
     title: tab.title || tab.url || '无标题',
-    url: tab.url || tab.pendingUrl,
+    url: tab.url || tab.pendingUrl || '',
     favIconUrl: tab.favIconUrl || undefined,
-  };
+  }
 }
 
-export function buildSessionFromTabs(tabs, name) {
+export function buildSessionFromTabs(tabs: chrome.tabs.Tab[], name?: string): Session {
   const stashed = tabs.map(tabToStashed);
   return {
     id: newId(),
@@ -24,16 +42,16 @@ export function buildSessionFromTabs(tabs, name) {
   };
 }
 
-export async function collectStashableTabs(query) {
+export async function collectStashableTabs(query: chrome.tabs.QueryInfo) {
   const tabs = await chrome.tabs.query(query);
   return tabs.filter(isStashableTab);
 }
 
 /** 先写 storage 再关标签；本批内逐字重复的网址跳过（不查历史，同一网址可多次收纳）；file: 等无法恢复的网址跳过 */
-export async function stashTabs(tabs, sessionName) {
+export async function stashTabs(tabs: chrome.tabs.Tab[], sessionName?: string): Promise<StashResult> {
   if (!tabs.length) return { ok: false, reason: 'empty' };
-  const seen = new Set();
-  const keep = [];
+  const seen = new Set<string>()
+  const keep: chrome.tabs.Tab[] = []
   let skipped = 0;
   let skippedUnrestorable = 0;
   for (const tab of tabs) {
@@ -54,7 +72,8 @@ export async function stashTabs(tabs, sessionName) {
   }
   const session = buildSessionFromTabs(keep, sessionName);
   await addSession(session);
-  await chrome.tabs.remove(keep.map((t) => t.id));
+  const ids = keep.map((t) => t.id).filter((id): id is number => typeof id === 'number')
+  await chrome.tabs.remove(ids)
   return { ok: true, session, count: keep.length, skipped, skippedUnrestorable };
 }
 
@@ -63,7 +82,10 @@ export async function stashTabs(tabs, sessionName) {
  * @param {chrome.tabs.QueryInfo} query
  * @param {{ keepActive?: boolean }} [opts]
  */
-async function stashQuery(query, { keepActive = true } = {}) {
+async function stashQuery(
+  query: chrome.tabs.QueryInfo,
+  { keepActive = true }: { keepActive?: boolean } = {},
+): Promise<StashResult> {
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
   const tabs = await collectStashableTabs(query);
   if (keepActive && active?.id != null) {
@@ -78,11 +100,11 @@ async function stashQuery(query, { keepActive = true } = {}) {
   return stashTabs(tabs);
 }
 
-export async function stashCurrentWindow(opts) {
+export async function stashCurrentWindow(opts?: { keepActive?: boolean }) {
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
   return stashQuery({ windowId: active?.windowId }, opts);
 }
 
-export async function stashAllWindows(opts) {
+export async function stashAllWindows(opts?: { keepActive?: boolean }) {
   return stashQuery({}, opts);
 }

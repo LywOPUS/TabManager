@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mergeImport, mutateData, normalizeImport } from './storage.js';
+import { getData, mergeImport, mutateData, normalizeImport } from './storage.js';
 
 function backup(overrides = {}) {
   return {
@@ -78,6 +78,20 @@ assert.throws(
   ]);
 
   assert.deepEqual(stored.sessions.map((session) => session.id), ['first', 'second']);
+
+  stored = {
+    schemaVersion: 1,
+    sessions: [
+      { id: 'keep', name: '好会话', createdAt: 9, groups: [{ id: 'g', name: '未分组', tabs: [{ id: 't', title: 'A', url: 'https://a.test/' }, { id: 1 }] }] },
+      { name: '无 id', createdAt: 1, groups: [] },
+    ],
+  };
+  const parsed = await getData();
+  assert.equal(parsed.sessions.length, 1);
+  assert.equal(parsed.sessions[0].id, 'keep');
+  assert.equal(parsed.sessions[0].groups[0].tabs.length, 1);
+  assert.equal(parsed.sessions[0].groups[0].tabs[0].url, 'https://a.test/');
+
   if (previousChrome === undefined) delete globalThis.chrome;
   else globalThis.chrome = previousChrome;
 }

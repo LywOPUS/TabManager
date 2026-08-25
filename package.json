@@ -6,7 +6,7 @@
   "scripts": {
     "vendor:transformers": "npx tsx scripts/vendor-transformers.ts",
     "dev:ui": "vite --config ui/vite.config.ts",
-    "typecheck": "tsc -p ui/tsconfig.json --noEmit",
+    "typecheck": "tsc -p extension/tsconfig.json --noEmit && tsc -p ui/tsconfig.json --noEmit",
     "check:groups": "npx tsx extension/lib/storage.test.ts && npx tsx extension/lib/groupLabels.test.ts && npx tsx extension/lib/liveOrganize.test.ts && npx tsx extension/lib/localClassify.test.ts && npx tsx extension/lib/browserEmbedClassify.test.ts && npx tsx extension/lib/browserModelCache.test.ts && npx tsx extension/lib/bgJobs.test.ts && npx tsx extension/lib/offscreenRuntime.test.ts && npx tsx extension/lib/closeSuggest.test.ts",
     "test": "npm run check:groups",
     "check": "npm run typecheck && npm test && npm run build:ui",

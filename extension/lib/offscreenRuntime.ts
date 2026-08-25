@@ -1,5 +1,26 @@
 /** 模型推理放到 offscreen。Service Worker 不能动态 import()，必须走这里。 */
 
+import { isRecord } from './unknown.js'
+
+export type OffscreenRpcOp = 'classify' | 'preload' | 'unload' | 'warm' | 'device'
+
+export type OffscreenRpcBody = {
+  items?: unknown
+  opts?: unknown
+  modelId?: unknown
+  preferWebGPU?: unknown
+}
+
+type ModelRpcEnvelope = {
+  type: 'tm-offscreen' | 'tm-model'
+  op: OffscreenRpcOp
+  reqId: string
+  items?: unknown
+  opts?: unknown
+  modelId?: unknown
+  preferWebGPU?: unknown
+}
+
 export function inOffscreenPage() {
   try {
     return typeof location !== 'undefined' && /offscreen\.html$/i.test(location.pathname);
@@ -37,7 +58,8 @@ export async function ensureOffscreen() {
     });
     return true;
   } catch (e) {
-    if (/already exists|only one/i.test(String(e?.message || e))) return true;
+    const message = e instanceof Error ? e.message : String(e)
+    if (/already exists|only one/i.test(message)) return true
     console.warn('offscreen create failed', e);
     return false;
   }
@@ -52,40 +74,49 @@ export function canUseOffscreen() {
  * SW 一律进 offscreen（规范禁止 import()）。
  * 页面里：内置 MiniLM 就地加载，需下载的大模型才进 offscreen。
  */
-export function shouldOffloadModel(meta) {
+export function shouldOffloadModel(meta?: { bundled?: boolean }) {
   if (!canUseOffscreen()) return false;
   if (inServiceWorker()) return true;
   return !!(meta && !meta.bundled);
 }
 
-export async function offscreenRpc(op, payload = {}, onStatus) {
+export async function offscreenRpc(
+  op: OffscreenRpcOp,
+  payload: OffscreenRpcBody = {},
+  onStatus?: (text: string, detail?: unknown) => void,
+): Promise<unknown> {
   const ok = await ensureOffscreen();
   if (!ok) throw new Error('无法启动模型运行页');
   const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const onMsg = (msg) => {
-    if (msg?.type === 'tm-model-status' && msg.reqId === reqId) {
-      onStatus?.(msg.text, msg.detail);
-    }
-  };
+  const onMsg = (msg: unknown) => {
+    if (!isRecord(msg) || msg.type !== 'tm-model-status' || msg.reqId !== reqId) return
+    const text = typeof msg.text === 'string' ? msg.text : ''
+    onStatus?.(text, msg.detail)
+  }
   chrome.runtime.onMessage.addListener(onMsg);
-  const body = { ...payload, op, reqId };
+  const envelope: ModelRpcEnvelope = {
+    type: inServiceWorker() ? 'tm-offscreen' : 'tm-model',
+    op,
+    reqId,
+    items: payload.items,
+    opts: payload.opts,
+    modelId: payload.modelId,
+    preferWebGPU: payload.preferWebGPU,
+  }
   try {
-    const envelope = inServiceWorker()
-      ? { type: 'tm-offscreen', ...body }
-      : { type: 'tm-model', ...body };
     const res = await sendWithRetry(envelope);
-    if (res?.error) throw new Error(res.error);
+    if (isRecord(res) && typeof res.error === 'string') throw new Error(res.error);
     return res;
   } finally {
     chrome.runtime.onMessage.removeListener(onMsg);
   }
 }
 
-async function sendWithRetry(envelope, tries = 8) {
+async function sendWithRetry(envelope: ModelRpcEnvelope, tries = 8): Promise<unknown> {
   let last = new Error('模型运行页未就绪');
   for (let i = 0; i < tries; i += 1) {
     try {
-      const res = await chrome.runtime.sendMessage(envelope);
+      const res: unknown = await chrome.runtime.sendMessage(envelope);
       if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message);
       if (res !== undefined) return res;
     } catch (e) {

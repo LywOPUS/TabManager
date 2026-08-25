@@ -12,7 +12,7 @@ npm run vendor:transformers  # 仅当 extension/vendor 缺失时
 npm run dev:ui         # 本地预览 :5190
 ```
 
-改 `ui/` 后必须 `npm run build:ui`，再在浏览器扩展页「重新加载」。
+改 `ui/` 或 `extension/` 里的 TypeScript 后必须 `npm run build:ui`（会打 popup / 管理页 / 侧栏，以及 `background.js` / `offscreen.js`），再在浏览器扩展页「重新加载」。
 
 ## Cursor Cloud specific instructions
 

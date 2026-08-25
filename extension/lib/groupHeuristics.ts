@@ -8,7 +8,7 @@ const MULTI_SUFFIX = new Set([
   'github.io', 'gitlab.io', 'herokuapp.com', 'vercel.app', 'netlify.app',
 ]);
 
-export function registrableDomain(url) {
+export function registrableDomain(url: string) {
   try {
     const u = new URL(url);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
