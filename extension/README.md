@@ -4,14 +4,14 @@ OneTab 式收纳 + Edge 式本地整理。Chrome MV3 / Edge 桌面可加载；�
 
 ## 加载步骤
 
-1. 仓库根目录执行：`npm i` 与 `npm run build:ui`（改管理页后也要重新构建）
+1. 仓库根目录执行：`npm i` 与 `npm run build:ui`（改 `ui/` 或 `extension/*.ts` 后也要重新构建）
 2. 打开 `chrome://extensions`（Edge：`edge://extensions`）
 3. 开启「开发者模式」
 4. 点击「加载已解压的扩展程序」
 5. 选择本目录 `extension/`
-6. 改代码后：若改了 `ui/` 先 `npm run build:ui`，再在扩展页点「重新加载」
+6. 改代码后：先 `npm run build:ui`，再在扩展页点「重新加载」
 
-background / `lib/` 仍为原生 ES 模块；管理页与 popup 源码在仓库 `ui/`，产物为 `extension/management.html`、`extension/popup.html` + `extension/mgmt/`。
+源码是 TypeScript：`ui/` 与 `extension/*.ts`、`extension/lib/*.ts`。`npm run build:ui` 打出管理页 / popup / 侧栏，以及 `background.js` / `offscreen.js`。产物在 `extension/`。
 
 ## 权限说明
 

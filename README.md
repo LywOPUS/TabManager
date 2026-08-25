@@ -6,14 +6,14 @@
 
 ```bash
 npm i
-npm run build:ui          # 构建管理页与 popup → extension/
+npm run build:ui          # 构建管理页 / popup / 侧栏 / background / offscreen → extension/
 npm run vendor:transformers  # 如缺 vendor，重新拷贝 transformers
 npm run dev:ui            # UI 热更新预览（默认 :5190）
 ```
 
 加载扩展：开发者模式 →「加载已解压的扩展程序」→ 选择 `extension/`。
 
-改 `ui/` 后需重新 `npm run build:ui`，再在扩展页点「重新加载」。
+改 `ui/` 或 `extension/` 里的 TypeScript 后需重新 `npm run build:ui`，再在扩展页点「重新加载」。
 
 更细的权限与分类说明见 [`extension/README.md`](extension/README.md)。领域用语见 [`CONTEXT.md`](CONTEXT.md)。
 

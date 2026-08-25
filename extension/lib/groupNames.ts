@@ -1,29 +1,31 @@
-/** Session 内固定/保留组名（靠名称识别，无额外 schema 字段） */
-export const UNGROUPED_NAME = '未分组';
-export const READ_LATER_NAME = '稍后阅读';
+import type { Group, Session, StashedTab } from './storage.js'
 
-export function isUngroupedName(name) {
-  return String(name || '') === UNGROUPED_NAME;
+/** Session 内固定/保留组名（靠名称识别，无额外 schema 字段） */
+export const UNGROUPED_NAME = '未分组'
+export const READ_LATER_NAME = '稍后阅读'
+
+export function isUngroupedName(name: string | undefined) {
+  return String(name || '') === UNGROUPED_NAME
 }
 
-export function isReadLaterName(name) {
-  return String(name || '') === READ_LATER_NAME;
+export function isReadLaterName(name: string | undefined) {
+  return String(name || '') === READ_LATER_NAME
 }
 
 /** 建议分组/启发式命名时忽略的组 */
-export function isReservedGroupName(name) {
-  return isUngroupedName(name) || isReadLaterName(name);
+export function isReservedGroupName(name: string | undefined) {
+  return isUngroupedName(name) || isReadLaterName(name)
 }
 
-export function findReadLaterGroup(session) {
-  return (session?.groups || []).find((g) => isReadLaterName(g.name)) || null;
+export function findReadLaterGroup(session: Session | undefined) {
+  return (session?.groups || []).find((g) => isReadLaterName(g.name)) || null
 }
 
 /**
  * 保证会话内存在「稍后阅读」（可空）与「未分组」（可空）。
  * 排序：稍后阅读 → 其它主题组 → 未分组。
  */
-export function ensureFixedGroups(session, { newId }) {
+export function ensureFixedGroups(session: Session, { newId }: { newId: () => string }) {
   if (!session.groups) session.groups = [];
   let readLater = findReadLaterGroup(session);
   if (!readLater) {
@@ -39,10 +41,10 @@ export function ensureFixedGroups(session, { newId }) {
   return { readLater, ungrouped };
 }
 
-export function sortSessionGroups(groups) {
-  const readLater = [];
-  const ungrouped = [];
-  const rest = [];
+export function sortSessionGroups(groups: Group[] | undefined) {
+  const readLater: Group[] = []
+  const ungrouped: Group[] = []
+  const rest: Group[] = []
   for (const g of groups || []) {
     if (isReadLaterName(g.name)) readLater.push(g);
     else if (isUngroupedName(g.name)) ungrouped.push(g);
@@ -53,8 +55,8 @@ export function sortSessionGroups(groups) {
 }
 
 /** 参与建议分组的标签（排除稍后阅读） */
-export function tabsForSuggest(session) {
-  const out = [];
+export function tabsForSuggest(session: Session | undefined) {
+  const out: StashedTab[] = []
   for (const g of session?.groups || []) {
     if (isReadLaterName(g.name)) continue;
     for (const t of g.tabs || []) out.push(t);
@@ -63,7 +65,7 @@ export function tabsForSuggest(session) {
 }
 
 /** 去掉空主题组，保留空的固定组，并稳定排序 */
-export function pruneEmptyKeepFixed(session) {
+export function pruneEmptyKeepFixed(session: Session) {
   session.groups = sortSessionGroups(
     (session.groups || []).filter(
       (g) => g.tabs.length > 0 || isReadLaterName(g.name) || isUngroupedName(g.name),

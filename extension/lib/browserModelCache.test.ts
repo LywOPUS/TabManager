@@ -14,6 +14,7 @@ const {
   formatDownloadStatus,
   formatLoadStatus,
   installCacheOnlyFetch,
+  responseWithReadableBody,
 } = __test__;
 
 const gemma = 'onnx-community/embeddinggemma-300m-ONNX';
@@ -215,6 +216,20 @@ assert.ok(inv.leftoverBytes > 200 * 1024 * 1024);
     restore();
     globalThis.fetch = prev;
   }
+}
+
+{
+  const broken = {
+    body: null,
+    status: 200,
+    statusText: 'OK',
+    headers: new Headers({ 'x-a': '1' }),
+    arrayBuffer: async () => new Uint8Array([9, 8, 7]).buffer,
+  };
+  const fixed = await responseWithReadableBody(broken);
+  assert.ok(fixed.body, '空 body 的 Response 应补成可读流');
+  assert.equal(fixed.status, 200);
+  assert.deepEqual([...new Uint8Array(await fixed.arrayBuffer())], [9, 8, 7]);
 }
 
 console.log('browserModelCache ok');

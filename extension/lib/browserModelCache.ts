@@ -2,7 +2,7 @@
  * 浏览器内模型缓存：列出 / 删除 transformers-cache，并汇总多文件下载进度。
  * 已知模型 + 残留（半截、旧 fp16、对不上的 orphan）在这一份里算清。
  */
-import { BROWSER_MODELS, getBrowserModelMeta } from './browserModels.js';
+import { BROWSER_MODELS, getBrowserModelMeta, type BrowserModelMeta } from './browserModels.js';
 import { formatBytes } from './tabUsage.js';
 
 export const TRANSFORMERS_CACHE = 'transformers-cache';
@@ -15,7 +15,62 @@ export const MIN_READY_ONNX_DATA = 200 * 1024 * 1024;
 /** 小于这个的 onnx 当半截残文件 */
 export const STUB_ONNX = 1024 * 1024;
 
-export function cacheUrlMatchesModel(url, modelId) {
+export type ModelCacheState = 'bundled' | 'ready' | 'partial' | 'leftover' | 'empty'
+export type ModelCacheRow = {
+  id: string
+  label: string
+  note: string
+  bundled: boolean
+  state: ModelCacheState
+  bytes: number
+  fileCount: number
+  leftoverBytes: number
+  missingGraph: boolean
+  hint: string
+}
+export type ModelCacheOrphan = { url: string; name: string; bytes: number }
+export type ModelCacheInventory = {
+  models: ModelCacheRow[]
+  orphans: ModelCacheOrphan[]
+  leftoverBytes: number
+  leftoverCount: number
+  orphanBytes: number
+  totalBytes: number
+}
+
+type CacheEntry = { url: string; bytes?: number }
+type ModelIdRef = { id: string }
+type DownloadFileProgress = { loaded: number; total: number; done: boolean }
+type DownloadProgressEvent = {
+  file?: string
+  name?: string
+  status?: string
+  total?: number
+  loaded?: number
+  progress?: number
+}
+type DownloadSummary = {
+  loaded: number
+  total: number
+  done: number
+  count: number
+  pct: number
+  file: string
+  complete: boolean
+}
+type ModelCacheFileInfo = {
+  url: string
+  name: string
+  bytes: number
+  dtype: string
+  leftover: boolean
+}
+type ModelCacheRowFull = ModelCacheRow & {
+  dtypes: string[]
+  files: ModelCacheFileInfo[]
+}
+
+export function cacheUrlMatchesModel(url: string | undefined, modelId: string | undefined) {
   const u = String(url || '');
   const id = String(modelId || '');
   if (!u || !id) return false;
@@ -30,7 +85,7 @@ export function cacheUrlMatchesModel(url, modelId) {
   return false;
 }
 
-export function dtypeFromCacheUrl(url) {
+export function dtypeFromCacheUrl(url: string | undefined) {
   const u = String(url || '').toLowerCase();
   if (u.includes('fp16')) return 'fp16';
   if (u.includes('q4f16') || u.includes('q4')) return 'q4';
@@ -42,43 +97,43 @@ export function dtypeFromCacheUrl(url) {
 }
 
 /** 图文件：model.onnx / model_quantized.onnx（可能只有几百 KB） */
-export function isOnnxGraphUrl(url) {
+export function isOnnxGraphUrl(url: string | undefined) {
   return /\.onnx(\?|$)/i.test(String(url || ''));
 }
 
 /** 外挂权重：model_quantized.onnx_data（Gemma 约 309MB） */
-export function isOnnxDataUrl(url) {
+export function isOnnxDataUrl(url: string | undefined) {
   return /\.onnx_data(\?|$)/i.test(String(url || ''));
 }
 
-export function isOnnxUrl(url) {
+export function isOnnxUrl(url: string | undefined) {
   return isOnnxGraphUrl(url) || isOnnxDataUrl(url);
 }
 
-export function onnxStem(url) {
+export function onnxStem(url: string | undefined) {
   return fileNameOf(url).toLowerCase().replace(/\.onnx_data$/i, '').replace(/\.onnx$/i, '');
 }
 
 /** 常见图文件名，不能当半截残留删掉 */
-export function isOnnxGraphName(url) {
+export function isOnnxGraphName(url: string | undefined) {
   return /^model(_quantized|_q8|_uint8|_int8)?$/.test(onnxStem(url));
 }
 
-export function hasUsableOnnx(entries) {
-  const list = entries || [];
+export function hasUsableOnnx(entries: CacheEntry[] | undefined) {
+  const list: CacheEntry[] = entries || [];
   const graphs = list.filter((e) => isOnnxGraphUrl(e.url) && dtypeFromCacheUrl(e.url) !== 'fp16');
   const datas = list.filter((e) => isOnnxDataUrl(e.url) && dtypeFromCacheUrl(e.url) !== 'fp16');
   if (graphs.some((g) => (g.bytes || 0) >= MIN_READY_ONNX)) return true;
-  const dataByStem = new Map(datas.map((d) => [onnxStem(d.url), d]));
+  const dataByStem = new Map<string, CacheEntry>(datas.map((d) => [onnxStem(d.url), d]));
   return graphs.some((g) => {
     const d = dataByStem.get(onnxStem(g.url));
     return !!(d && (d.bytes || 0) >= MIN_READY_ONNX_DATA);
   });
 }
 
-export function missingOnnxGraph(entries) {
-  const list = entries || [];
-  const graphStems = new Set(
+export function missingOnnxGraph(entries: CacheEntry[] | undefined) {
+  const list: CacheEntry[] = entries || [];
+  const graphStems = new Set<string>(
     list.filter((e) => isOnnxGraphUrl(e.url)).map((e) => onnxStem(e.url)),
   );
   return list.filter((e) => (
@@ -89,7 +144,10 @@ export function missingOnnxGraph(entries) {
   ));
 }
 
-export function accumulateDownloadProgress(files, event) {
+export function accumulateDownloadProgress(
+  files: Map<string, DownloadFileProgress>,
+  event: DownloadProgressEvent | null | undefined,
+) {
   const name = String(event?.file || event?.name || 'file');
   const prev = files.get(name) || { loaded: 0, total: 0, done: false };
   const status = event?.status;
@@ -117,7 +175,7 @@ export function accumulateDownloadProgress(files, event) {
   return summarizeDownload(files, name);
 }
 
-export function summarizeDownload(files, currentFile = '') {
+export function summarizeDownload(files: Map<string, DownloadFileProgress>, currentFile = ''): DownloadSummary {
   let loaded = 0;
   let total = 0;
   let done = 0;
@@ -137,7 +195,7 @@ export function summarizeDownload(files, currentFile = '') {
   return { loaded, total, done, count, pct, file, complete };
 }
 
-export function formatDownloadStatus(sum) {
+export function formatDownloadStatus(sum: DownloadSummary) {
   const size = sum.total > 0
     ? `${formatBytes(sum.loaded)} / ${formatBytes(sum.total)}`
     : formatBytes(sum.loaded);
@@ -150,17 +208,46 @@ export function formatDownloadStatus(sum) {
 }
 
 /** 整理：不提文件/下载，只说在加载 */
-export function formatLoadStatus(_sum) {
+export function formatLoadStatus(_sum: DownloadSummary) {
   return '正在加载模型';
 }
 
-function requestUrl(input) {
-  if (typeof input === 'string') return input;
-  if (input instanceof URL) return input.href;
-  return String(input?.url || '');
+/** Cache API 有时给出 body === null 的 Response；transformers 一走 getReader 就会炸。 */
+export async function responseWithReadableBody(res: Response) {
+  if (res.body) return res
+  const buf = await res.arrayBuffer()
+  return new Response(buf, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  })
 }
 
-function isLocalExtensionUrl(url) {
+let streamableCacheInstalled = false
+
+/** 让 caches.match 永远交出可读 body。只装一次。 */
+export function installStreamableCacheMatch() {
+  if (streamableCacheInstalled || typeof Cache === 'undefined') return
+  const orig = Cache.prototype.match
+  Cache.prototype.match = async function (request, options) {
+    const res = await orig.call(this, request, options)
+    if (!res) return res
+    try {
+      return await responseWithReadableBody(res)
+    } catch {
+      return res
+    }
+  }
+  streamableCacheInstalled = true
+}
+
+function requestUrl(input: RequestInfo | URL) {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.href;
+  return String(input.url || '');
+}
+
+function isLocalExtensionUrl(url: string) {
   return /^(chrome-extension:|moz-extension:|blob:|data:)/i.test(url);
 }
 
@@ -171,7 +258,7 @@ function isLocalExtensionUrl(url) {
 export function installCacheOnlyFetch() {
   const orig = typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null;
   if (!orig) return () => {};
-  const wrapped = async (input, init) => {
+  const wrapped = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = requestUrl(input);
     if (!url || isLocalExtensionUrl(url)) return orig(input, init);
     try {
@@ -191,17 +278,17 @@ export function installCacheOnlyFetch() {
   };
 }
 
-function fileNameOf(url) {
+function fileNameOf(url: string | undefined) {
   try {
-    const path = new URL(url).pathname;
-    return decodeURIComponent(path.split('/').pop() || url);
+    const path = new URL(String(url || '')).pathname;
+    return decodeURIComponent(path.split('/').pop() || String(url || ''));
   } catch {
     return String(url || '').split('/').pop() || '';
   }
 }
 
 /** 这条缓存要不要当残留清掉（旧 fp16 / 对不上已知模型）。图文件再小也不能删。 */
-export function isLeftoverEntry(entry, models = BROWSER_MODELS) {
+export function isLeftoverEntry(entry: CacheEntry | null | undefined, models: readonly ModelIdRef[] = BROWSER_MODELS) {
   const url = entry?.url || '';
   const bytes = Number(entry?.bytes) || 0;
   const known = models.some((m) => cacheUrlMatchesModel(url, m.id));
@@ -213,7 +300,10 @@ export function isLeftoverEntry(entry, models = BROWSER_MODELS) {
   return false;
 }
 
-export function summarizeModelEntries(entries, meta) {
+export function summarizeModelEntries(
+  entries: CacheEntry[],
+  meta: Pick<BrowserModelMeta, 'id' | 'label' | 'note' | 'bundled'>,
+): ModelCacheRowFull {
   const mine = entries.filter((e) => cacheUrlMatchesModel(e.url, meta.id));
   const bytes = mine.reduce((s, e) => s + (e.bytes || 0), 0);
   const dtypes = [...new Set(mine.map((e) => dtypeFromCacheUrl(e.url)).filter(Boolean))];
@@ -222,7 +312,7 @@ export function summarizeModelEntries(entries, meta) {
   const usable = hasUsableOnnx(mine);
   const missingGraph = missingOnnxGraph(mine).length > 0;
 
-  let state = 'empty';
+  let state: ModelCacheState = 'empty';
   if (meta.bundled) state = 'bundled';
   else if (usable) state = 'ready';
   else if (leftoverBytes > 0 && leftoverBytes >= bytes * 0.5) state = 'leftover';
@@ -264,9 +354,12 @@ export function summarizeModelEntries(entries, meta) {
   };
 }
 
-export function buildModelInventory(entries, models = BROWSER_MODELS) {
+export function buildModelInventory(
+  entries: CacheEntry[],
+  models: readonly BrowserModelMeta[] = BROWSER_MODELS,
+): ModelCacheInventory {
   const list = models.map((meta) => summarizeModelEntries(entries, meta));
-  const orphans = entries
+  const orphans: ModelCacheOrphan[] = entries
     .filter((e) => !models.some((m) => cacheUrlMatchesModel(e.url, m.id)))
     .map((e) => ({
       url: e.url,
@@ -286,7 +379,7 @@ export function buildModelInventory(entries, models = BROWSER_MODELS) {
   };
 }
 
-export function isModelInventoryReady(row) {
+export function isModelInventoryReady(row: Pick<ModelCacheRow, 'state'> | null | undefined) {
   return row?.state === 'bundled' || row?.state === 'ready';
 }
 
@@ -302,11 +395,11 @@ async function openTransformersCache() {
   }
 }
 
-export async function listCachedDtypes(modelId) {
+export async function listCachedDtypes(modelId: string) {
   const cache = await openTransformersCache();
   if (!cache) return [];
   const reqs = await cache.keys();
-  const dtypes = [];
+  const dtypes: string[] = [];
   for (const req of reqs) {
     if (!cacheUrlMatchesModel(req.url, modelId)) continue;
     const d = dtypeFromCacheUrl(req.url);
@@ -319,7 +412,7 @@ async function readCacheEntries() {
   const cache = await openTransformersCache();
   if (!cache) return [];
   const reqs = await cache.keys();
-  const out = [];
+  const out: CacheEntry[] = [];
   for (const req of reqs) {
     let bytes = 0;
     try {
@@ -343,7 +436,7 @@ export async function listBrowserModelCache() {
   return (await inspectBrowserModelCache()).models;
 }
 
-export async function isBrowserModelCacheReady(modelId) {
+export async function isBrowserModelCacheReady(modelId: string) {
   const meta = getBrowserModelMeta(modelId);
   if (meta.bundled) return true;
   const row = summarizeModelEntries(await readCacheEntries(), meta);
@@ -351,7 +444,7 @@ export async function isBrowserModelCacheReady(modelId) {
 }
 
 /** 续下时跟已有缓存用同一个源，避免 hf-mirror / huggingface 各下一份 */
-export async function cachedModelHost(modelId) {
+export async function cachedModelHost(modelId: string) {
   const id = getBrowserModelMeta(modelId).id;
   const mine = (await readCacheEntries()).filter((e) => cacheUrlMatchesModel(e.url, id));
   if (mine.some((e) => e.url.includes('hf-mirror.com'))) return 'https://hf-mirror.com';
@@ -359,14 +452,14 @@ export async function cachedModelHost(modelId) {
   return '';
 }
 
-async function deleteMatching(predicate) {
+async function deleteMatching(predicate: (url: string) => boolean) {
   const cache = await openTransformersCache();
   let removed = 0;
   let bytes = 0;
   if (!cache) return { ok: true, removed, bytes };
   const entries = await readCacheEntries();
   const reqs = await cache.keys();
-  const byUrl = new Map(entries.map((e) => [e.url, e.bytes || 0]));
+  const byUrl = new Map<string, number>(entries.map((e) => [e.url, e.bytes || 0]));
   for (const req of reqs) {
     if (!predicate(req.url)) continue;
     await cache.delete(req);
@@ -376,15 +469,15 @@ async function deleteMatching(predicate) {
   return { ok: true, removed, bytes };
 }
 
-export async function deleteBrowserModelCache(modelId) {
+export async function deleteBrowserModelCache(modelId: string) {
   const id = getBrowserModelMeta(modelId).id;
   return deleteMatching((url) => cacheUrlMatchesModel(url, id));
 }
 
 /** 清半截、旧 fp16、对不上已知模型的条目；留下能用的量化版 */
-export async function purgeLeftoverModelCache(modelId) {
+export async function purgeLeftoverModelCache(modelId?: string) {
   const entries = await readCacheEntries();
-  const drop = new Set(
+  const drop = new Set<string>(
     entries
       .filter((e) => {
         if (modelId && !cacheUrlMatchesModel(e.url, getBrowserModelMeta(modelId).id)) return false;
@@ -413,4 +506,5 @@ export const __test__ = {
   formatDownloadStatus,
   formatLoadStatus,
   installCacheOnlyFetch,
+  responseWithReadableBody,
 };

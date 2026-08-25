@@ -1,13 +1,54 @@
-export interface StashResultLike {
-  ok: boolean
-  reason?: string
-  count?: number
+import { isRecord } from '@ext/lib/unknown.ts'
+
+export type StashResultOk = {
+  ok: true
+  count: number
+  session: { id: string }
   skipped?: number
   skippedUnrestorable?: number
   keptActive?: boolean
 }
 
-export function stashFailText(r: { reason?: string }): string {
+export type StashResultFail = {
+  ok: false
+  reason: string
+  skipped?: number
+  skippedUnrestorable?: number
+}
+
+export type StashResult = StashResultOk | StashResultFail
+
+function optCount(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/** 解析 background 收纳回包。消息边界上的数据一律当 unknown。 */
+export function parseStashResult(input: unknown): StashResult {
+  if (!isRecord(input)) return { ok: false, reason: 'unknown' }
+  const skipped = optCount(input.skipped)
+  const skippedUnrestorable = optCount(input.skippedUnrestorable)
+  if (input.ok !== true) {
+    return {
+      ok: false,
+      reason: typeof input.reason === 'string' && input.reason ? input.reason : 'unknown',
+      skipped,
+      skippedUnrestorable,
+    }
+  }
+  const session = isRecord(input.session) ? input.session : undefined
+  const sessionId = typeof session?.id === 'string' ? session.id : ''
+  if (!sessionId) return { ok: false, reason: 'unknown' }
+  return {
+    ok: true,
+    count: optCount(input.count) ?? 0,
+    session: { id: sessionId },
+    skipped,
+    skippedUnrestorable,
+    keptActive: input.keptActive === true,
+  }
+}
+
+export function stashFailText(r: StashResultFail): string {
   switch (r.reason) {
     case 'empty':
       return '没有可收纳的标签'
@@ -23,8 +64,8 @@ export function stashFailText(r: { reason?: string }): string {
 }
 
 /** 收纳结果的一句话提示；重复与无法恢复（file: 等）分开说明 */
-export function stashResultText(r: StashResultLike): string {
-  const parts = [`已收纳 ${r.count ?? 0} 个标签`]
+export function stashResultText(r: StashResultOk): string {
+  const parts = [`已收纳 ${r.count} 个标签`]
   if (r.keptActive) parts.push('当前页已留下')
   if (r.skipped) parts.push(`跳过 ${r.skipped} 个本批重复`)
   if (r.skippedUnrestorable) parts.push(`${r.skippedUnrestorable} 个本地文件等页面无法恢复，已保留`)

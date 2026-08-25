@@ -4,10 +4,35 @@
  */
 
 import { isStashableTab } from './urls.js';
+import { isRecord, optFiniteNumber } from './unknown.js';
 
 export const DEFAULT_IDLE_MS = 30 * 60 * 1000;
 
-export function formatBytes(n) {
+export type UsageRow = {
+  tabId: number
+  windowId: number
+  title: string
+  url: string
+  discarded: boolean
+  active: boolean
+  audible: boolean
+  pinned: boolean
+  lastAccessed: number | null
+  idleMs: number | null
+  bytes: number | null
+  cpu: number | null
+  sharedProcess: boolean
+  suggestDiscard: boolean
+}
+
+export type TabUsageResult = {
+  source: 'idle+processes' | 'idle'
+  idleMs: number
+  rows: UsageRow[]
+  suggestedIds: number[]
+}
+
+export function formatBytes(n: number | null | undefined) {
   if (n == null || !Number.isFinite(n) || n < 0) return '—';
   if (n < 1024) return `${Math.round(n)} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -15,7 +40,11 @@ export function formatBytes(n) {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-export function formatIdle(ms) {
+function lastAccessedNumber(tab: object): number | null {
+  return optFiniteNumber((tab as { lastAccessed?: unknown }).lastAccessed) ?? null;
+}
+
+export function formatIdle(ms: number | null | undefined) {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
   const m = Math.floor(ms / 60000);
   if (m < 1) return '刚刚';
@@ -30,8 +59,45 @@ export function defaultIdleMinutes() {
   return Math.round(DEFAULT_IDLE_MS / 60000);
 }
 
+type ProcessInfo = {
+  type?: string
+  privateMemory?: number
+  cpu?: number
+  tasks?: Array<{ tabId?: number }>
+}
+
+type ProcessesApi = {
+  getProcessInfo: (processIds: number[], includeMemory: boolean) => Promise<unknown>
+}
+
+type ProcessMemOk = {
+  ok: true
+  map: Map<number, number>
+  cpu: Map<number, number>
+  shared: Set<number>
+}
+
+type ProcessMemFail = {
+  ok: false
+  map: Map<number, number>
+  cpu: Map<number, number>
+  shared: Set<number>
+}
+
+type ProcessMemInfo = ProcessMemOk | ProcessMemFail
+
+function isProcessesApi(value: unknown): value is ProcessesApi {
+  return isRecord(value) && typeof value.getProcessInfo === 'function'
+}
+
+function processesApi(): ProcessesApi | undefined {
+  if (typeof chrome === 'undefined') return undefined
+  const extra: unknown = Reflect.get(chrome, 'processes')
+  return isProcessesApi(extra) ? extra : undefined
+}
+
 export function processesApiAvailable() {
-  return typeof chrome !== 'undefined' && !!chrome.processes?.getProcessInfo;
+  return !!processesApi()
 }
 
 /** 稳定版没有 chrome.processes，也不再写进清单（否则扩展页报错）。 */
@@ -39,11 +105,16 @@ export async function ensureProcessesPermission() {
   return processesApiAvailable();
 }
 
-function emptyMemInfo() {
-  return { ok: false, map: new Map(), cpu: new Map(), shared: new Set() };
+function emptyMemInfo(): ProcessMemFail {
+  return {
+    ok: false,
+    map: new Map<number, number>(),
+    cpu: new Map<number, number>(),
+    shared: new Set<number>(),
+  }
 }
 
-function tabMeta(tab) {
+function tabMeta(tab: chrome.tabs.Tab & { id: number }) {
   return {
     tabId: tab.id,
     windowId: tab.windowId,
@@ -53,33 +124,55 @@ function tabMeta(tab) {
     active: !!tab.active,
     audible: !!tab.audible,
     pinned: !!tab.pinned,
-    lastAccessed: typeof tab.lastAccessed === 'number' ? tab.lastAccessed : null,
+    lastAccessed: lastAccessedNumber(tab),
   };
 }
 
 /** 可休眠/关闭（排除钉住、有声、当前、已休眠） */
-export function isActionableUsageRow(row) {
+export function isActionableUsageRow(row: UsageRow | undefined) {
   return !!(row && !row.discarded && !row.active && !row.audible && !row.pinned);
 }
 
 /** 自动建议休眠 */
-export function isDiscardCandidate(row, idleMs = DEFAULT_IDLE_MS) {
-  if (!isActionableUsageRow(row) || row.idleMs == null) return false;
-  return row.idleMs >= idleMs;
+export function isDiscardCandidate(row: UsageRow | undefined, idleMs = DEFAULT_IDLE_MS) {
+  if (!row || !isActionableUsageRow(row) || row.idleMs == null) return false
+  return row.idleMs >= idleMs
 }
 
-async function attachProcessMemory() {
+function parseProcessInfo(value: unknown): ProcessInfo | null {
+  if (!isRecord(value)) return null
+  const tasksRaw = value.tasks
+  const tasks: Array<{ tabId?: number }> = []
+  if (Array.isArray(tasksRaw)) {
+    for (const task of tasksRaw) {
+      if (!isRecord(task)) continue
+      tasks.push(typeof task.tabId === 'number' ? { tabId: task.tabId } : {})
+    }
+  }
+  return {
+    type: typeof value.type === 'string' ? value.type : undefined,
+    privateMemory: typeof value.privateMemory === 'number' ? value.privateMemory : undefined,
+    cpu: typeof value.cpu === 'number' ? value.cpu : undefined,
+    tasks,
+  }
+}
+
+async function attachProcessMemory(): Promise<ProcessMemInfo> {
   if (!processesApiAvailable()) return emptyMemInfo();
   try {
-    const processes = await chrome.processes.getProcessInfo([], true);
-    const memByTab = new Map();
-    const cpuByTab = new Map();
-    const shared = new Set();
-    for (const p of Object.values(processes || {})) {
+    const api = processesApi()
+    if (!api) return emptyMemInfo()
+    const processes: unknown = await api.getProcessInfo([], true)
+    const memByTab = new Map<number, number>()
+    const cpuByTab = new Map<number, number>()
+    const shared = new Set<number>()
+    if (!isRecord(processes)) return emptyMemInfo()
+    for (const raw of Object.values(processes)) {
+      const p = parseProcessInfo(raw)
       if (!p || p.type !== 'renderer' || p.privateMemory == null) continue;
       const tabIds = (p.tasks || [])
         .map((t) => t.tabId)
-        .filter((id) => typeof id === 'number');
+        .filter((id): id is number => typeof id === 'number');
       if (!tabIds.length) continue;
       const each = p.privateMemory / tabIds.length;
       for (const id of tabIds) {
@@ -97,7 +190,11 @@ async function attachProcessMemory() {
 /**
  * @param {{ currentWindowOnly?: boolean, idleMs?: number, preferProcesses?: boolean }} [opts]
  */
-export async function collectTabUsage(opts = {}) {
+export async function collectTabUsage(opts: {
+  currentWindowOnly?: boolean
+  idleMs?: number
+  preferProcesses?: boolean
+} = {}): Promise<TabUsageResult> {
   const {
     currentWindowOnly = false,
     idleMs = DEFAULT_IDLE_MS,
@@ -105,7 +202,10 @@ export async function collectTabUsage(opts = {}) {
   } = opts;
   const now = Date.now();
   const tabs = await chrome.tabs.query(currentWindowOnly ? { currentWindow: true } : {});
-  const candidates = tabs.filter((t) => typeof t.id === 'number' && (isStashableTab(t) || t.discarded));
+  const candidates = tabs.filter(
+    (t): t is chrome.tabs.Tab & { id: number } =>
+      typeof t.id === 'number' && (isStashableTab(t) || !!t.discarded),
+  )
 
   const memInfo =
     preferProcesses && processesApiAvailable() ? await attachProcessMemory() : emptyMemInfo();
@@ -114,15 +214,16 @@ export async function collectTabUsage(opts = {}) {
     const base = tabMeta(tab);
     const idleMsVal =
       base.lastAccessed != null ? Math.max(0, now - base.lastAccessed) : null;
-    const row = {
+    const row: UsageRow = {
       ...base,
       idleMs: idleMsVal,
       bytes: memInfo.map.get(tab.id) ?? null,
       cpu: memInfo.cpu.get(tab.id) ?? null,
       sharedProcess: memInfo.shared.has(tab.id),
-    };
-    row.suggestDiscard = isDiscardCandidate(row, idleMs);
-    return row;
+      suggestDiscard: false,
+    }
+    row.suggestDiscard = isDiscardCandidate(row, idleMs)
+    return row
   });
 
   rows.sort((a, b) => {
@@ -144,7 +245,7 @@ export async function collectTabUsage(opts = {}) {
 
 const DISCARD_CHUNK = 12;
 
-export async function discardTabsByIds(tabIds) {
+export async function discardTabsByIds(tabIds: number[]) {
   const ids = (tabIds || []).filter((id) => typeof id === 'number');
   let n = 0;
   for (let i = 0; i < ids.length; i += DISCARD_CHUNK) {
@@ -155,7 +256,7 @@ export async function discardTabsByIds(tabIds) {
   return n;
 }
 
-export async function closeTabsByIds(tabIds) {
+export async function closeTabsByIds(tabIds: number[]) {
   const ids = (tabIds || []).filter((id) => typeof id === 'number');
   if (!ids.length) return 0;
   try {

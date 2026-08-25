@@ -45,9 +45,14 @@ export default defineConfig({
         management: path.resolve(__dirname, 'management.html'),
         popup: path.resolve(__dirname, 'popup.html'),
         sidepanel: path.resolve(__dirname, 'sidepanel.html'),
+        background: path.resolve(__dirname, '../extension/background.ts'),
+        offscreen: path.resolve(__dirname, '../extension/offscreen.ts'),
       },
       output: {
-        entryFileNames: 'mgmt/[name].js',
+        entryFileNames: (chunk) =>
+          chunk.name === 'background' || chunk.name === 'offscreen'
+            ? '[name].js'
+            : 'mgmt/[name].js',
         chunkFileNames: 'mgmt/chunks/[name]-[hash].js',
         assetFileNames: 'mgmt/[name][extname]',
       },
